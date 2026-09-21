@@ -1,0 +1,18 @@
+# Pip-installable runtime dependencies for the Windows portable build.
+streamlit==1.63.0
+langchain==1.4.0
+langchain-chroma==1.1.0
+langchain-community==0.4.2
+langchain-core==1.6.2
+langchain-experimental==0.4.2
+langchain-openai==1.6.2
+langchain-text-splitters==1.1.2
+langgraph==1.2.11
+chromadb==1.5.9
+faiss-cpu==1.15.0
+numexpr==2.14.2
+numpy==2.4.6
+pandas==3.0.5
+playwright==1.62.0
+pydantic==2.13.5
+requests==2.32.5
