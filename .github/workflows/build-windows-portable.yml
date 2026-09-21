@@ -10,24 +10,45 @@ jobs:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"
+
       - name: Build self-contained executable
         shell: pwsh
         run: ./scripts/build_windows_portable.ps1
+
       - name: Smoke-test portable executable
         shell: pwsh
         run: |
-          $process = Start-Process -FilePath "$PWD/dist/JeongSoyoonAI/JeongSoyoonAI.exe" -PassThru
+          $exe = Resolve-Path "$PWD/dist/JeongSoyoonAI/JeongSoyoonAI.exe"
+          $tempLog = Join-Path $env:TEMP "JeongSoyoonAI_portable_startup.log"
+          Remove-Item $tempLog -Force -ErrorAction SilentlyContinue
+
+          Write-Host "Starting portable EXE: $exe"
+          $process = Start-Process -FilePath $exe -WorkingDirectory "$PWD/dist/JeongSoyoonAI" -PassThru
+
           try {
             $deadline = (Get-Date).AddMinutes(2)
             $healthy = $false
             $rootReady = $false
 
             do {
+              if ($process.HasExited) {
+                Write-Host "Portable EXE exited early with code $($process.ExitCode)."
+                if (Test-Path $tempLog) {
+                  Write-Host "--- portable startup log ---"
+                  Get-Content $tempLog -Raw | Write-Host
+                  Write-Host "--- end portable startup log ---"
+                }
+                throw "Portable EXE exited before Streamlit opened port 8501."
+              }
+
               try {
                 $health = Invoke-WebRequest -UseBasicParsing -SkipHttpErrorCheck http://127.0.0.1:8501/_stcore/health
+                Write-Host "Health response: HTTP $($health.StatusCode)"
+
                 if ($health.StatusCode -eq 200) {
                   $healthy = $true
                   Write-Host "Streamlit health endpoint: HTTP 200"
@@ -52,13 +73,25 @@ jobs:
               } catch {
                 Write-Host "Waiting for portable Streamlit: $($_.Exception.Message)"
               }
+
               Start-Sleep -Seconds 2
             } while ((Get-Date) -lt $deadline)
 
             if (-not $healthy) {
+              if (Test-Path $tempLog) {
+                Write-Host "--- portable startup log ---"
+                Get-Content $tempLog -Raw | Write-Host
+                Write-Host "--- end portable startup log ---"
+              }
               throw "Portable EXE did not expose Streamlit's health endpoint within two minutes."
             }
+
             if (-not $rootReady) {
+              if (Test-Path $tempLog) {
+                Write-Host "--- portable startup log ---"
+                Get-Content $tempLog -Raw | Write-Host
+                Write-Host "--- end portable startup log ---"
+              }
               throw "Portable EXE exposed Streamlit health, but GET / did not return the bundled Streamlit HTML frontend."
             }
           } finally {
@@ -66,8 +99,18 @@ jobs:
               Stop-Process -Id $process.Id -Force
             }
           }
-      - uses: actions/upload-artifact@v4
+
+      - name: Upload portable EXE
+        uses: actions/upload-artifact@v4
         with:
           name: JeongSoyoonAI-Windows
           path: dist/JeongSoyoonAI
           if-no-files-found: error
+
+      - name: Upload startup diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: JeongSoyoonAI-startup-diagnostics
+          path: ${{ runner.temp }}/JeongSoyoonAI_portable_startup.log
+          if-no-files-found: ignore
