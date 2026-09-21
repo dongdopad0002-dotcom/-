@@ -1,0 +1,103 @@
+
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html,body{margin:0;padding:0;background:transparent;font-family:system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;overflow:hidden}
+  #mic{width:42px;height:42px;border:1px solid #dfe3e8;border-radius:50%;background:#fff;color:#475569;cursor:pointer;font-size:19px;line-height:42px;text-align:center;box-shadow:0 3px 12px rgba(0,0,0,.07);transition:.15s}
+  #mic:hover{background:#f5f7f9;transform:translateY(-1px)}
+  #mic.active{background:#fee2e2;border-color:#fca5a5;color:#dc2626;box-shadow:0 0 0 5px rgba(239,68,68,.10)}
+  #status{font-size:10px;color:#8b95a1;text-align:center;margin-top:2px;white-space:nowrap}
+  .wrap{width:48px;margin:auto;text-align:center}
+</style>
+</head>
+<body>
+<div class="wrap"><button id="mic" title="음성 입력">🎙</button><div id="status">말하기</div></div>
+<script>
+// 외부 CDN의 streamlit-component-lib에 의존하지 않습니다.
+// 필요한 최소 통신 API만 직접 구현해 배포 환경의 CDN/프록시 문제를 피합니다.
+window.Streamlit = window.Streamlit || {};
+Streamlit.RENDER_EVENT = "streamlit:render";
+Streamlit._send = function(type, data) {
+  window.parent.postMessage(Object.assign({isStreamlitMessage:true, type:type}, data || {}), "*");
+};
+Streamlit.setComponentReady = function() {
+  Streamlit._send("streamlit:componentReady", {apiVersion:1});
+};
+Streamlit.setComponentValue = function(value) {
+  Streamlit._send("streamlit:setComponentValue", {dataType:"json", value:value});
+};
+Streamlit.setFrameHeight = function(height) {
+  Streamlit._send("streamlit:setFrameHeight", {height:height || 0});
+};
+
+const mic=document.getElementById('mic');
+const status=document.getElementById('status');
+const SR=window.SpeechRecognition || window.webkitSpeechRecognition;
+let rec=null;
+let running=false;
+let committed='';
+
+function send(value){
+  if(window.Streamlit){ Streamlit.setComponentValue(value); }
+}
+
+function setFrame(){
+  if(window.Streamlit){ Streamlit.setFrameHeight(52); }
+}
+
+function stopRec(){
+  running=false;
+  mic.classList.remove('active');
+  status.textContent='말하기';
+  if(rec){ try{rec.stop();}catch(e){} }
+}
+
+function startRec(){
+  if(!SR){
+    status.textContent='브라우저 미지원';
+    return;
+  }
+  if(running){ stopRec(); return; }
+  rec=new SR();
+  rec.lang='ko-KR';
+  rec.continuous=true;
+  rec.interimResults=true;
+  committed='';
+  running=true;
+  mic.classList.add('active');
+  status.textContent='듣는 중';
+  rec.onresult=(e)=>{
+    let finalPart=''; let interim='';
+    for(let i=e.resultIndex;i<e.results.length;i++){
+      const text=e.results[i][0].transcript;
+      if(e.results[i].isFinal) finalPart+=text; else interim+=text;
+    }
+    committed += finalPart;
+    send({text:(committed+interim).trim(), listening:true, final:finalPart.trim()});
+  };
+  rec.onerror=(e)=>{
+    status.textContent = e.error==='not-allowed' ? '마이크 권한 필요' : '다시 시도';
+    running=false; mic.classList.remove('active');
+    send({text:committed.trim(), listening:false, error:e.error||'unknown'});
+  };
+  rec.onend=()=>{
+    if(running){
+      try{rec.start();}catch(e){}
+    }else{
+      send({text:committed.trim(), listening:false});
+    }
+  };
+  try{rec.start();}catch(e){ running=false; mic.classList.remove('active'); status.textContent='다시 시도'; }
+}
+
+mic.addEventListener('click',startRec);
+
+if(window.Streamlit){
+  Streamlit.setComponentReady();
+  setFrame();
+}
+</script>
+</body>
+</html>
