@@ -11,6 +11,7 @@ for package in (
     "streamlit", "playwright", "langchain", "langchain_community",
     "langchain_core", "langchain_experimental", "langchain_openai",
     "langchain_chroma", "langgraph", "chromadb", "faiss",
+    "mypy_extensions",
 ):
     package_datas, package_binaries, package_hiddenimports = collect_all(package)
     datas += package_datas
