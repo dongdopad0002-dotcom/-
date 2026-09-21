@@ -96,9 +96,15 @@ def main() -> None:
     # Explicitly select the loopback interface and a fixed port used by the
     # GitHub smoke test.  Disable the file watcher because it is unnecessary
     # in a frozen executable and can cause PyInstaller/runtime path issues.
+    # PyInstaller can make Streamlit believe it is running in development mode.
+    # In development mode Streamlit refuses explicit server.port settings.
+    # Force production mode before invoking the CLI.
+    os.environ["STREAMLIT_GLOBAL_DEVELOPMENTMODE"] = "false"
+
     sys.argv = [
         "streamlit",
         "run",
+        "--global.developmentMode=false",
         str(app_file),
         "--server.headless=true",
         "--server.address=127.0.0.1",
