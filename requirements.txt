@@ -17,3 +17,5 @@ playwright==1.62.0
 pydantic==2.13.5
 requests==2.32.5
 mypy-extensions==1.1.0
+wikipedia
+arxiv
