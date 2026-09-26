@@ -988,9 +988,9 @@ def disk_usage(path: str = ".") -> str:
     }, ensure_ascii=False, indent=2)
 
 _LOCAL_EXTRA_TOOLS = [
-    current_time, list_directory, file_exists, file_info, write_text_file,
-    append_text_file, make_directory, delete_path, copy_path, move_path,
-    search_files, grep_text, read_text_file, sha256_file, json_format,
+    current_time, file_exists, file_info,
+    make_directory, delete_path, copy_path, move_path,
+    search_files, grep_text, sha256_file, json_format,
     csv_summary, regex_extract, fetch_url, download_url, base64_encode_text,
     base64_decode_text, count_words, text_diff, generate_uuid, system_info,
     environment_variable, zip_create, zip_extract, list_processes, ping_host,
