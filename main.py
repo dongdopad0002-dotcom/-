@@ -2736,6 +2736,9 @@ def _begin_chat_execution(
         "mode": str(mode),
         "input_text": str(input_text or ""),
         "status": "running",
+        "partial_output": "",
+        "partial_saved_epoch": 0,
+        "partial_saved_length": 0,
         "started_at": datetime.now().isoformat(timespec="seconds"),
         "updated_at": datetime.now().isoformat(timespec="seconds"),
     }
@@ -2750,6 +2753,9 @@ def _finish_chat_execution(
     execution = chat.get("execution")
     if not isinstance(execution, dict):
         return
+    # 다른 rerun/Stop 버튼이 이미 취소를 기록했다면 완료/실패 상태로 되돌리지 않습니다.
+    if execution.get("status") in {"cancel_requested", "cancelled"} and status not in {"cancel_requested", "cancelled"}:
+        status = "cancelled"
     execution["status"] = str(status)
     execution["updated_at"] = datetime.now().isoformat(timespec="seconds")
     if error:
@@ -2757,6 +2763,192 @@ def _finish_chat_execution(
     chat["execution"] = execution
     st.session_state["execution_locked"] = execution.get("status") == "running"
     _save_chat_store(_ensure_chat_store())
+
+
+class _ExecutionCancelled(Exception):
+    """사용자가 현재 실행을 정지했음을 나타내는 내부 예외입니다."""
+
+
+def _update_execution_partial(run_id: str, partial_output: str, *, force: bool = False) -> None:
+    """스트리밍 중인 답변을 중간 저장하여 정지/새로고침 시 현재 출력이 보존되게 합니다."""
+    if not run_id:
+        return
+    try:
+        chat = _get_active_chat_record()
+        execution = chat.get("execution")
+        if not isinstance(execution, dict) or str(execution.get("run_id")) != str(run_id):
+            return
+        text_value = str(partial_output or "")
+        now = time.time()
+        last_at = float(execution.get("partial_saved_epoch", 0) or 0)
+        last_len = int(execution.get("partial_saved_length", 0) or 0)
+        if not force and (now - last_at < 0.6) and (len(text_value) - last_len < 500):
+            return
+        execution["partial_output"] = text_value[-200000:]
+        execution["partial_saved_epoch"] = now
+        execution["partial_saved_length"] = len(text_value)
+        execution["updated_at"] = datetime.now().isoformat(timespec="seconds")
+        chat["execution"] = execution
+        _save_chat_store(_ensure_chat_store())
+    except Exception:
+        pass
+
+
+def _execution_is_cancelled(run_id: Optional[str]) -> bool:
+    """현재 실행이 다른 브라우저 이벤트/정지 버튼에 의해 취소되었는지 확인합니다."""
+    if not run_id:
+        return False
+    try:
+        store = _load_chat_store()
+        active_id = store.get("active_chat_id")
+        for chat in store.get("chats", []):
+            if chat.get("id") != active_id:
+                continue
+            execution = chat.get("execution") or {}
+            return (
+                str(execution.get("run_id")) == str(run_id)
+                and str(execution.get("status")) in {"cancel_requested", "cancelled"}
+            )
+    except Exception:
+        return False
+    return False
+
+
+def _request_execution_cancel(run_id: str) -> bool:
+    """저장소에 취소 요청을 기록합니다. 실제 실행은 다음 안전 지점에서 종료됩니다."""
+    if not run_id:
+        return False
+    try:
+        store = _load_chat_store()
+        active_id = store.get("active_chat_id")
+        for chat in store.get("chats", []):
+            if chat.get("id") != active_id:
+                continue
+            execution = chat.get("execution") or {}
+            if str(execution.get("run_id")) != str(run_id):
+                return False
+            if execution.get("status") not in {"running", "cancel_requested"}:
+                return False
+            execution["status"] = "cancel_requested"
+            execution["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            chat["execution"] = execution
+            store["chats"] = [chat if c.get("id") == active_id else c for c in store.get("chats", [])]
+            _save_chat_store(store)
+            return True
+    except Exception:
+        return False
+    return False
+
+
+def _finalize_cancelled_execution(run_id: str) -> None:
+    """취소된 실행의 마지막 출력과 정지 표시를 대화 기록에 남깁니다."""
+    try:
+        store = _load_chat_store()
+        active_id = store.get("active_chat_id")
+        for chat in store.get("chats", []):
+            if chat.get("id") != active_id:
+                continue
+            execution = chat.get("execution") or {}
+            if str(execution.get("run_id")) != str(run_id):
+                return
+            partial = str(execution.get("partial_output", "") or "").rstrip()
+            marker = "⏹ 응답이 정지되었습니다."
+            content = f"{partial}\n\n{marker}" if partial else marker
+            messages = []
+            for raw in chat.get("messages", []):
+                try:
+                    msg = _deserialize_message(raw)
+                except Exception:
+                    msg = None
+                if msg is not None:
+                    messages.append(msg)
+            # 이미 같은 정지 표시가 마지막에 있으면 중복하지 않습니다.
+            last_text = _content_to_text(messages[-1].content) if messages and isinstance(messages[-1], AM) else ""
+            if marker not in last_text:
+                messages.append(AM(content=content))
+            chat["messages"] = [x for x in (_serialize_message(m) for m in messages) if x is not None]
+            execution["status"] = "cancelled"
+            execution["partial_output"] = partial
+            execution["updated_at"] = datetime.now().isoformat(timespec="seconds")
+            chat["execution"] = execution
+            chat["updated_at"] = execution["updated_at"]
+            _save_chat_store(store)
+            return
+    except Exception:
+        return
+
+
+def _consume_cancel_query() -> Optional[str]:
+    """Stop 버튼이 URL query로 전달한 취소 요청을 한 번 처리합니다."""
+    try:
+        if hasattr(st, "query_params"):
+            run_id = str(st.query_params.get("cancel_run", "") or "").strip()
+            if run_id:
+                _request_execution_cancel(run_id)
+                _finalize_cancelled_execution(run_id)
+                try:
+                    del st.query_params["cancel_run"]
+                except Exception:
+                    pass
+                return run_id
+    except Exception:
+        pass
+    return None
+
+
+def _render_cancel_button_bridge(run_id: Optional[str], running: bool) -> None:
+    """native st.chat_input의 전송 버튼을 실행 중에는 Stop 버튼처럼 동작시킵니다."""
+    run_value = json.dumps(str(run_id or ""), ensure_ascii=False)
+    running_value = "true" if running else "false"
+    components.html(f"""
+<script>
+(function() {{
+  const RUN_ID = {run_value};
+  const RUNNING = {running_value};
+  function install() {{
+    try {{
+      const doc = window.parent && window.parent.document ? window.parent.document : document;
+      const btn = doc.querySelector('[data-testid="stChatInputSubmitButton"] button') ||
+                  doc.querySelector('button[aria-label="Send message"]');
+      if (!btn) return false;
+      if (RUNNING) {{
+        btn.dataset.soyoonStop = '1';
+        btn.setAttribute('aria-label', '응답 정지');
+        btn.title = '현재 응답을 정지합니다';
+        btn.innerHTML = '<span style="font-size:18px;line-height:1">■</span>';
+        btn.style.borderRadius = '10px';
+        btn.style.minWidth = '42px';
+        if (!btn.dataset.soyoonStopBound) {{
+          btn.addEventListener('click', function(ev) {{
+            if (btn.dataset.soyoonStop !== '1') return;
+            ev.preventDefault();
+            ev.stopPropagation();
+            if (ev.stopImmediatePropagation) ev.stopImmediatePropagation();
+            if (!RUN_ID) return;
+            const url = new URL(window.parent.location.href);
+            url.searchParams.set('cancel_run', RUN_ID);
+            window.parent.location.href = url.toString();
+          }}, true);
+          btn.dataset.soyoonStopBound = '1';
+        }}
+      }} else if (btn.dataset.soyoonStop === '1') {{
+        btn.dataset.soyoonStop = '0';
+        btn.removeAttribute('aria-label');
+        btn.title = '';
+        btn.innerHTML = '';
+      }}
+      return true;
+    }} catch (e) {{ return false; }}
+  }}
+  let tries = 0;
+  const timer = setInterval(function() {{
+    tries++;
+    if (install() || tries > 120) clearInterval(timer);
+  }}, 250);
+  install();
+}})();
+</script>
+""", height=0, scrolling=False)
 
 
 def _message_fingerprint(message):
@@ -2820,6 +3012,22 @@ def _load_active_chat_into_session():
 def _persist_current_chat():
     store = _ensure_chat_store()
     chat = _get_active_chat_record()
+
+    # 현재 Streamlit 실행이 취소된 직후에는 Stop rerun이 이미 디스크에 남긴
+    # 마지막 출력/정지 표시를 이전 실행이 덮어쓰지 않도록 보호합니다.
+    try:
+        disk_store = _load_chat_store()
+        disk_active_id = disk_store.get("active_chat_id")
+        disk_chat = next((c for c in disk_store.get("chats", []) if c.get("id") == disk_active_id), None)
+        disk_execution = (disk_chat or {}).get("execution") or {}
+        if (
+            disk_active_id == chat.get("id")
+            and str(disk_execution.get("run_id")) == str((chat.get("execution") or {}).get("run_id"))
+            and disk_execution.get("status") in {"cancel_requested", "cancelled"}
+        ):
+            return
+    except Exception:
+        pass
 
     current_messages = _dedupe_consecutive_message_blocks(
         st.session_state.get("chat_history", [])
@@ -3962,8 +4170,15 @@ def _prepare_active_react_graphs():
 # 어떤 실행 경로(에이전트/계획 모드/도구)에서 먼저 접근하더라도
 # chat_store가 반드시 초기화되도록 보장합니다.
 _ensure_chat_store()
+_consume_cancel_query()
 if "chat_history" not in st.session_state:
     _load_active_chat_into_session()
+else:
+    # Stop 버튼으로 새 rerun이 시작된 경우 저장된 마지막 출력까지 다시 반영합니다.
+    try:
+        _load_active_chat_into_session()
+    except Exception:
+        pass
 
 _render_chat_sidebar()
 
@@ -4075,7 +4290,12 @@ st.session_state["execution_locked"] = bool(_pending_execution)
 if _pending_execution:
     _resume_mode = str(_pending_execution.get("mode") or "ReAct")
     choice = _resume_mode
-    st.info("이전 실행을 복구하고 있습니다. 복구가 끝나면 입력창을 다시 사용할 수 있습니다.")
+    if str(_pending_execution.get("status")) == "cancel_requested":
+        _finalize_cancelled_execution(str(_pending_execution.get("run_id") or ""))
+        _pending_execution = None
+        st.session_state["execution_locked"] = False
+    else:
+        st.info("실행 중입니다. 전송 버튼이 정지 버튼으로 바뀝니다.")
 
 # Native chat_input 바로 위에만 작은 컨트롤을 둡니다. 입력창 자체는 건드리지 않습니다.
 _tool_left, _tool_right = st.columns([1, 1], gap="small")
@@ -4115,7 +4335,7 @@ _chat_kwargs = dict(
     placeholder="메시지를 입력하세요…",
     key="chat_input",
     max_chars=None,
-    disabled=bool(_pending_execution),
+    disabled=False,
 )
 if "accept_file" in _chat_sig:
     _chat_kwargs["accept_file"] = "multiple"
@@ -4124,6 +4344,11 @@ if "max_upload_size" in _chat_sig:
     # 애플리케이션 수준의 실질적인 크기 제한을 제거합니다.
     # 실제 HTTP 프록시/서버가 별도 제한을 두는 경우에는 그 설정이 우선합니다.
     _chat_kwargs["max_upload_size"] = 1_048_576  # 1 TB / 파일
+
+_render_cancel_button_bridge(
+    str((_pending_execution or {}).get("run_id") or ""),
+    bool(_pending_execution),
+)
 
 user_input = st.chat_input(**_chat_kwargs)
 
@@ -5349,6 +5574,7 @@ if choice == "ReAct" and (user_input or _resume_react):
             "ReAct",
             getattr(user_input, "text", ""),
         )
+        _render_cancel_button_bridge(_ACTIVE_SUBAGENT_RUN_ID, True)
 
         # 업로드 파일을 먼저 저장/색인하여 동적 retriever 도구를 등록한 뒤
         # 현재 요청에 사용할 graph를 만듭니다.
@@ -5422,6 +5648,9 @@ if choice == "ReAct" and (user_input or _resume_react):
                     )
 
                     for item in stream:
+                        if _execution_is_cancelled(_ACTIVE_SUBAGENT_RUN_ID):
+                            _update_execution_partial(_ACTIVE_SUBAGENT_RUN_ID, stream_state["final_answer"], force=True)
+                            raise _ExecutionCancelled()
                         ui.poll_subagents()
                         mode = None
                         payload = item
@@ -5467,6 +5696,7 @@ if choice == "ReAct" and (user_input or _resume_react):
                             if text_delta:
                                 stream_state["final_answer"] += text_delta
                                 stream_state["streamed_answer"] = True
+                                _update_execution_partial(_ACTIVE_SUBAGENT_RUN_ID, stream_state["final_answer"])
                                 # 핵심: st.write_stream이 이 delta를 즉시 렌더링합니다.
                                 yield text_delta
 
@@ -5553,6 +5783,14 @@ if choice == "ReAct" and (user_input or _resume_react):
                 if streamed_result and not final_answer:
                     final_answer = str(streamed_result)
 
+            except _ExecutionCancelled:
+                partial = str(stream_state.get("final_answer", "") or "").rstrip()
+                _update_execution_partial(_ACTIVE_SUBAGENT_RUN_ID, partial, force=True)
+                content = f"{partial}\n\n⏹ 응답이 정지되었습니다." if partial else "⏹ 응답이 정지되었습니다."
+                ui.answer_delta(content, replace=True)
+                _append_history_message(AM(content=content))
+                _finish_chat_execution("cancelled")
+                final_answer = content
             except Exception as exc:
                 error_text = _format_execution_error(exc)
                 st.error(error_text)
@@ -5592,9 +5830,12 @@ if choice == "ReAct" and (user_input or _resume_react):
                 )
 
             _persist_current_chat()
-            _finish_chat_execution("completed" if final_answer else "failed")
+            _current_execution_state = _get_active_chat_record().get("execution") or {}
+            if _current_execution_state.get("status") not in {"cancelled", "cancel_requested"}:
+                _finish_chat_execution("completed" if final_answer else "failed")
             _ACTIVE_SUBAGENT_RUN_ID = None
             _ACTIVE_SUBAGENT_NO_SUB_GRAPH = None
+            _render_cancel_button_bridge("", False)
 
 
 # ==========================================================
@@ -5623,6 +5864,10 @@ def _run_planning_mode(mode_name: str, user_input, resume: bool = False):
             "run_" + uuid.uuid4().hex,
             mode_name,
             query,
+        )
+        _render_cancel_button_bridge(
+            str((_get_active_chat_record().get("execution") or {}).get("run_id") or ""),
+            True,
         )
 
     with st.chat_message("assistant"):
@@ -5657,11 +5902,15 @@ def _run_planning_mode(mode_name: str, user_input, resume: bool = False):
 
             _plan_status(f"🚀 {mode_name} 시작")
 
+            _plan_run_id = str((_get_active_chat_record().get("execution") or {}).get("run_id") or "")
             for update in graph.stream(
                 initial_state,
                 {"recursion_limit": recursion_limit},
                 stream_mode="updates",
             ):
+                if _execution_is_cancelled(_plan_run_id):
+                    _finalize_cancelled_execution(_plan_run_id)
+                    raise _ExecutionCancelled()
                 if not isinstance(update, dict):
                     continue
 
@@ -5692,6 +5941,9 @@ def _run_planning_mode(mode_name: str, user_input, resume: bool = False):
             else:
                 ui.answer_delta("실행은 완료되었지만 최종 결과가 없습니다.", replace=True)
 
+        except _ExecutionCancelled:
+            _finish_chat_execution("cancelled")
+            st.rerun()
         except Exception as exc:
             error_text = _format_execution_error(exc)
             st.error(error_text)
@@ -5709,6 +5961,7 @@ def _run_planning_mode(mode_name: str, user_input, resume: bool = False):
                     _finish_chat_execution("failed")
             _set_active_agent_ui(None)
             _persist_current_chat()
+            _render_cancel_button_bridge("", False)
 
 
 if (
