@@ -106,7 +106,6 @@ def main() -> None:
         "run",
         "--global.developmentMode=false",
         str(app_file),
-        "--server.headless=true",
         "--server.address=127.0.0.1",
         "--server.port=8501",
         "--server.fileWatcherType=none",
