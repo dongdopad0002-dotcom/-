@@ -1,7 +1,7 @@
 # Pip-installable runtime dependencies for the Windows portable build.
 streamlit==1.63.0
 arxiv
-yotube-search
+youtube-search
 wikipedia
 langchain==1.4.0
 langchain-chroma==1.1.0
