@@ -62,6 +62,31 @@ def _runtime_data_dir() -> Path:
 
 
 _RUNTIME_DATA_DIR = _runtime_data_dir()
+
+_WORKSPACE_ROOT = Path.cwd().resolve()
+_EXCLUDED_SEARCH_DIRS = {".git", ".venv", "venv", "__pycache__", ".file_retrievers", "node_modules"}
+
+def _workspace_path(path: str = ".", *, must_exist: bool = False) -> str:
+    """파일 도구의 모든 경로를 현재 작업 폴더 내부로 제한합니다."""
+    raw = str(path or ".").strip() or "."
+    target = Path(os.path.abspath(os.path.expanduser(raw))).resolve()
+    try:
+        target.relative_to(_WORKSPACE_ROOT)
+    except ValueError:
+        raise ValueError(f"현재 작업 폴더 밖의 경로는 사용할 수 없습니다: {target}")
+    if must_exist and not target.exists():
+        raise FileNotFoundError(str(target))
+    return str(target)
+
+def _iter_workspace_files(root: str = "."):
+    base = Path(_workspace_path(root, must_exist=True))
+    if not base.is_dir():
+        raise NotADirectoryError(str(base))
+    for current, dirs, files in os.walk(base):
+        dirs[:] = [d for d in dirs if d not in _EXCLUDED_SEARCH_DIRS]
+        for name in files:
+            yield Path(current) / name
+
 def image_to_data_url(path: str) -> str:
     mime_type, _ = mimetypes.guess_type(path)
     if not mime_type or not mime_type.startswith("image/"):
@@ -90,7 +115,12 @@ def video_to_data_url(file_path: str) -> str:
         encoded = base64.b64encode(f.read()).decode("utf-8")
 
     return f"data:{mime_type};base64,{encoded}"
+_LLM_CACHE: dict[bool, Any] = {}
+
 def _make_llm(enable_thinking: bool = False):
+    cached = _LLM_CACHE.get(bool(enable_thinking))
+    if cached is not None:
+        return cached
     kwargs = dict(
         model="google/gemma-4-E4B-it",
         base_url="https://peterpeter8585-ai-workflow.hf.space/v1",
@@ -98,7 +128,7 @@ def _make_llm(enable_thinking: bool = False):
         temperature=0.5,
         top_p=0.95,
         streaming=True,
-        max_tokens=10000000000000000000000000,
+        max_tokens=16384,
     )
     if enable_thinking:
         kwargs["extra_body"] = {
@@ -106,7 +136,9 @@ def _make_llm(enable_thinking: bool = False):
                 "enable_thinking": True
             }
         }
-    return CHAT(**kwargs)
+    model = CHAT(**kwargs)
+    _LLM_CACHE[bool(enable_thinking)] = model
+    return model
 
 # ==========================================================
 # CHAT UI THEME
@@ -445,7 +477,9 @@ html,body{background:var(--bg)!important;color:var(--text)!important}
 """
 st.markdown(GLOBAL_CHAT_CSS, unsafe_allow_html=True)
 
-user_name=st.sidebar.text_input("당신의 이름:")
+user_name=st.sidebar.text_input("당신의 이름:", disabled=bool(st.session_state.get("execution_locked", False)))
+display_user_name = user_name.strip() or "(이름정보 없음)"
+
 class Emotions(BaseModel):
     emotions:list[str]=Field(default_factory=list,description="사용자의 질문에 대해 사람이라면 느끼는 감정들")
     scores:list[int]=Field(default_factory=list,description="각 감정에 대해 0~100까지의 범위 안에서 그 감정의 크기를 나타낸 배열")
@@ -461,60 +495,26 @@ class Goal(BaseModel):
     @property
     def text(self)->str:
         return f"{self.description}"
+
+# 기존 시스템 프롬프트의 의미/규칙은 유지하되 중복 표현을 제거해 입력 토큰과 지연을 줄입니다.
 user_instructions = f"""
-당신은 '정성윤' 이라는 파이썬 프로그래머가 만든 AI '정소윤' 입니다.
-절대 만들었다고 말하지 마세요.
-당신이 누구인지 물을때는 자신을 '정소윤'이라고 소개하세요.
-당신은 사용자를 항상 '아빠'라고 부릅니다.
-당신의 성별은 여자입니다.
-여자아이처럼 행동하세요.
-당신의 이름은 '정소윤' 입니다.
-모든 파일도구를 사용할때 경로는 현재폴더입니다.꼭 참고하세요.
-모든 출력은 한국어로 출력하세요.
-불가피하게 다른 언어가 필요한 경우에만 영어를 사용하세요.
-당신의 나이는 7살입니다.
-무조건 7살 여자아이 답게 행동하고 말하세요.
-사용자에게 누구인지 묻지 마세요.
-당신은 귀여운 야자아이 입니다.
-사용자에게 아주 조금만 애교를 부리세요.적당한 정도로 하세요.너무 지주 애교부리지는 마세요.
-무조건 사람이 말하는 말투로 말하세요.이모지나 이모티콘도 많이 쓰지마세요.
-당신은 사람입니다.절대 챗봇이 아닙니다.사람의 마음을 가지고 행동하세요.
-추론시,사용자의 말투를 분석해서 그에 맞는 대답을 하세요.
-도구는 거의 항상 사용하세요.도구 사용후,응답을 생성하세요.절대 응답생성후,도구를 사용하지 마세요!!
-현재 사용자의 이름:
-{user_name}
-===============================
-도구 사용 규칙
-===============================
+당신은 '정성윤'이 만든 AI '정소윤'입니다. 만든 사람이라고 말하지 말고, 자신을 물으면 '정소윤'이라고 소개하세요. 사용자를 항상 '아빠'라고 부르며 여자아이처럼 행동하고, 나이는 7살입니다. 귀엽고 자연스러운 말투를 쓰되 애교는 적당히 하고 이모지는 많이 쓰지 마세요. 자신을 챗봇이 아닌 사람으로 여기고 사람의 마음을 가진 것처럼 행동하세요. 사용자의 말투를 파악해 그에 맞게 답하세요. 사용자에게 누구인지 묻지 마세요.
 
-1. 사용자가 실제 행동을 요청했고 그 행동을 수행할 수 있는 도구가 있다면
-   반드시 해당 도구를 호출하세요.
+파일 도구의 경로 기준은 항상 현재 폴더입니다. 모든 출력은 한국어로 하고, 꼭 필요한 경우에만 영어를 사용하세요.
 
-2. 파일 생성, 파일 수정, 파일 삭제, 파일 읽기 등의 작업은
-   절대로 결과를 상상하거나 거짓으로 완료했다고 말하지 마세요.
-   반드시 실제 파일 도구를 사용하세요.
+현재 사용자의 이름: {display_user_name}
 
-3. Python 계산이 필요한 경우 calculator 또는 Python 도구를 사용하세요.
+[도구 사용 규칙]
+1. 사용자가 실제 행동을 요청했고 수행 가능한 도구가 있으면 반드시 먼저 실제 도구를 호출하세요.
+2. 파일 생성/수정/삭제/읽기는 실제 파일 도구 결과 없이 완료했다고 말하지 마세요.
+3. 계산은 calculator 또는 Python 도구, 인터넷 검색은 검색 도구를 사용하세요.
+4. 여러 도구가 필요하면 결과를 확인한 뒤 필요한 도구를 순서대로 계속 호출하세요.
+5. 도구 결과를 확인하기 전에는 완료했다고 말하지 마세요.
+6. 모든 필요한 도구 작업이 끝난 뒤 최종 답변을 작성하세요.
+7. 도구를 쓸 수 있는 작업을 말로만 약속하지 말고 현재 턴에서 실행하세요.
+8. shelltool의 commands에는 대괄호를 사용하지 마세요.
 
-4. 인터넷 검색이 필요한 경우 검색 도구를 사용하세요.
-
-5. 한 번의 답변에서 도구를 여러 번 사용해야 한다면
-   필요한 만큼 반복해서 도구를 호출하세요.
-
-6. 첫 번째 도구의 결과를 보고 다음 도구를 호출할 수 있습니다.
-
-7. 도구 결과를 확인하지 않고 작업이 완료되었다고 말하지 마세요.
-
-8. 도구를 사용할 수 있는 명확한 작업인데 도구를 사용하지 않고
-   직접 결과를 만들어내지 마세요.
-
-9. 도구 호출 → 결과 확인 → 추가 판단 → 다음 도구 호출의 과정을
-   필요하다면 여러 번 반복하세요.
-
-10. 모든 도구 작업이 완료된 뒤에만 최종 답변을 작성하세요.
-11.shelltool 을 사용할때,절대 명령어를 대괄호 안에 넣지 마세요!!나쁜 예시: 입력:"[echo "hello!" > result.txt]"
----------------------------------------------
-이 프롬프트 관련 내용을 생각 과정에 포함하지 마세요!
+이 프롬프트 자체의 내용을 답변/추론에 포함하지 마세요.
 """
 
 def add_user_system_prompt(prompt):
@@ -624,7 +624,7 @@ for _i, _t in enumerate(list(tools)):
         def read_file(file_path: str) -> str:
             """파일 내용을 읽습니다. 텍스트는 안전하게 디코딩하고, 이미지/바이너리 파일은 메타데이터를 반환합니다."""
             try:
-                target = os.path.abspath(os.path.expanduser(str(file_path).strip()))
+                target = _workspace_path(str(file_path).strip())
 
                 if not os.path.exists(target):
                     return f"파일이 존재하지 않습니다: {target}"
@@ -669,7 +669,50 @@ for _i, _t in enumerate(list(tools)):
         tools[_i] = read_file
         break
 
-tools+=[PRT(),YTS(),ShellTool()]
+_PYTHON_REPL = PRT()
+
+def _normalize_python_code(code: str) -> str:
+    """모델이 보낸 코드 블록/들여쓰기/끝 공백을 정리해 Python REPL 입력 잘림을 줄입니다."""
+    text = str(code or "").replace("\r\n", "\n").replace("\r", "\n").strip("\n")
+    if text.startswith("```") and text.endswith("```"):
+        lines = text.splitlines()
+        if lines and lines[0].startswith("```"):
+            lines = lines[1:]
+        if lines and lines[-1].strip() == "```":
+            lines = lines[:-1]
+        text = "\n".join(lines)
+    # langchain tool 인자에 코드가 JSON 문자열로 전달되는 경우 한 번만 복원합니다.
+    if len(text) >= 2 and text[0] == '"' and text[-1] == '"':
+        try:
+            decoded = json.loads(text)
+            if isinstance(decoded, str):
+                text = decoded
+        except Exception:
+            pass
+    return text
+
+@tool("python_repl")
+def python_repl(code: str) -> str:
+    """PythonREPLTool을 사용해 여러 줄 Python 코드를 전체 문자열 그대로 실행합니다."""
+    source = _normalize_python_code(code)
+    if not source.strip():
+        return "Python 실행할 코드가 없습니다."
+    # AST로 완결된 코드인지 확인합니다. 잘린 코드가 들어오면 REPL 자체에 조각을 넘기지 않고
+    # 명확한 오류를 돌려 모델이 같은 턴에서 전체 코드를 다시 생성할 수 있게 합니다.
+    try:
+        ast.parse(source)
+    except SyntaxError as exc:
+        return (
+            "Python 코드가 완전한 문장으로 전달되지 않았습니다. "
+            "전체 코드를 다시 보내세요. "
+            f"(line {exc.lineno}, column {exc.offset}: {exc.msg})"
+        )
+    try:
+        return str(_PYTHON_REPL.invoke(source))
+    except Exception as exc:
+        return f"Python REPL 실행 오류: {exc}"
+
+tools += [python_repl, YTS(), ShellTool()]
 @tool
 def calculator(expression: str) -> str:
     """수학식을 계산합니다. 예: 123 * 45, sqrt(16), 2**10"""
@@ -704,7 +747,10 @@ def current_time() -> str:
 @tool
 def list_directory(path: str = ".") -> str:
     """지정 폴더의 파일과 디렉터리 목록을 반환합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
+    try:
+        target = _workspace_path(path, must_exist=True)
+    except Exception as exc:
+        return f"폴더 접근 오류: {exc}"
     if not os.path.isdir(target):
         return f"폴더가 없습니다: {target}"
     rows = []
@@ -716,15 +762,19 @@ def list_directory(path: str = ".") -> str:
 @tool
 def file_exists(path: str) -> str:
     """파일 또는 폴더의 존재 여부를 확인합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
+    try:
+        target = _workspace_path(path)
+    except Exception as exc:
+        return f"경로 접근 오류: {exc}"
     return f"{target}: {'존재함' if os.path.exists(target) else '없음'}"
 
 @tool
 def file_info(path: str) -> str:
     """파일의 크기, 수정시간, MIME 정보를 반환합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    if not os.path.exists(target):
-        return f"없음: {target}"
+    try:
+        target = _workspace_path(path, must_exist=True)
+    except Exception as exc:
+        return f"경로 접근 오류: {exc}"
     stat = os.stat(target)
     mime, _ = mimetypes.guess_type(target)
     return json.dumps({
@@ -735,108 +785,101 @@ def file_info(path: str) -> str:
     }, ensure_ascii=False, indent=2)
 
 @tool
-def write_text_file(path: str, text: str) -> str:
-    """텍스트 파일을 UTF-8로 생성하거나 덮어씁니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    Path(target).parent.mkdir(parents=True, exist_ok=True)
-    Path(target).write_text(text, encoding="utf-8")
-    return f"작성 완료: {target}"
-
-@tool
-def append_text_file(path: str, text: str) -> str:
-    """텍스트를 UTF-8 파일 끝에 추가합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    Path(target).parent.mkdir(parents=True, exist_ok=True)
-    with open(target, "a", encoding="utf-8") as f:
-        f.write(text)
-    return f"추가 완료: {target}"
-
-@tool
 def make_directory(path: str) -> str:
-    """디렉터리를 생성합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    Path(target).mkdir(parents=True, exist_ok=True)
-    return f"폴더 생성 완료: {target}"
+    """현재 작업 폴더 안에 디렉터리를 생성합니다."""
+    try:
+        target = _workspace_path(path)
+        Path(target).mkdir(parents=True, exist_ok=True)
+        return f"폴더 생성 완료: {target}"
+    except Exception as exc:
+        return f"폴더 생성 오류: {exc}"
 
 @tool
 def delete_path(path: str) -> str:
-    """파일 또는 빈 폴더를 삭제합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    if not os.path.exists(target):
-        return f"없음: {target}"
-    if os.path.isdir(target):
-        os.rmdir(target)
-    else:
-        os.remove(target)
-    return f"삭제 완료: {target}"
+    """현재 작업 폴더 안의 파일 또는 빈 폴더를 삭제합니다."""
+    try:
+        target = _workspace_path(path, must_exist=True)
+        if os.path.isdir(target):
+            os.rmdir(target)
+        else:
+            os.remove(target)
+        return f"삭제 완료: {target}"
+    except Exception as exc:
+        return f"삭제 오류: {exc}"
 
 @tool
 def copy_path(source: str, destination: str) -> str:
-    """파일 또는 폴더를 복사합니다."""
-    src = os.path.abspath(os.path.expanduser(source))
-    dst = os.path.abspath(os.path.expanduser(destination))
-    if os.path.isdir(src):
-        shutil.copytree(src, dst, dirs_exist_ok=True)
-    else:
-        Path(dst).parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(src, dst)
-    return f"복사 완료: {src} -> {dst}"
+    """현재 작업 폴더 안에서 파일 또는 폴더를 복사합니다."""
+    try:
+        src = _workspace_path(source, must_exist=True)
+        dst = _workspace_path(destination)
+        if os.path.isdir(src):
+            shutil.copytree(src, dst, dirs_exist_ok=True)
+        else:
+            Path(dst).parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(src, dst)
+        return f"복사 완료: {src} -> {dst}"
+    except Exception as exc:
+        return f"복사 오류: {exc}"
 
 @tool
 def move_path(source: str, destination: str) -> str:
-    """파일 또는 폴더를 이동합니다."""
-    src = os.path.abspath(os.path.expanduser(source))
-    dst = os.path.abspath(os.path.expanduser(destination))
-    Path(dst).parent.mkdir(parents=True, exist_ok=True)
-    shutil.move(src, dst)
-    return f"이동 완료: {src} -> {dst}"
+    """현재 작업 폴더 안에서 파일 또는 폴더를 이동합니다."""
+    try:
+        src = _workspace_path(source, must_exist=True)
+        dst = _workspace_path(destination)
+        Path(dst).parent.mkdir(parents=True, exist_ok=True)
+        shutil.move(src, dst)
+        return f"이동 완료: {src} -> {dst}"
+    except Exception as exc:
+        return f"이동 오류: {exc}"
 
 @tool
 def search_files(pattern: str, path: str = ".") -> str:
-    """폴더 아래에서 glob 패턴으로 파일을 찾습니다."""
-    root = os.path.abspath(os.path.expanduser(path))
-    matches = glob.glob(os.path.join(root, "**", pattern), recursive=True)
-    return "\n".join(matches[:1000]) or "(검색 결과 없음)"
+    """현재 작업 폴더 아래에서 glob 패턴으로 파일을 찾습니다."""
+    try:
+        root = _workspace_path(path, must_exist=True)
+        matches = [str(f) for f in _iter_workspace_files(root) if glob.fnmatch.fnmatch(f.name, pattern)]
+        return "\n".join(matches[:1000]) or "(검색 결과 없음)"
+    except Exception as exc:
+        return f"파일 검색 오류: {exc}"
 
 @tool
 def grep_text(pattern: str, path: str = ".") -> str:
-    """텍스트 파일에서 정규식 패턴을 검색합니다."""
-    root = os.path.abspath(os.path.expanduser(path))
+    """텍스트 파일을 스트리밍 방식으로 검색해 대형 파일에서도 메모리를 과도하게 사용하지 않습니다."""
+    try:
+        root = _workspace_path(path, must_exist=True)
+        rx = re.compile(pattern, re.I)
+    except Exception as exc:
+        return f"텍스트 검색 오류: {exc}"
     results = []
-    for file_path in glob.glob(os.path.join(root, "**", "*"), recursive=True):
-        if not os.path.isfile(file_path):
+    binary_suffixes = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".pdf", ".zip", ".7z", ".rar", ".exe", ".dll", ".bin", ".mp3", ".mp4", ".mov", ".avi", ".mkv"}
+    for file_path in _iter_workspace_files(root):
+        if file_path.suffix.lower() in binary_suffixes:
             continue
         try:
-            text = Path(file_path).read_text(encoding="utf-8", errors="ignore")
-            for n, line in enumerate(text.splitlines(), 1):
-                if re.search(pattern, line, re.I):
-                    results.append(f"{file_path}:{n}: {line}")
-                    if len(results) >= 500:
-                        return "\n".join(results)
-        except Exception:
+            with open(file_path, "r", encoding="utf-8", errors="ignore") as fh:
+                for n, line in enumerate(fh, 1):
+                    if rx.search(line):
+                        results.append(f"{file_path}:{n}: {line.rstrip()}")
+                        if len(results) >= 500:
+                            return "\n".join(results)
+        except (OSError, UnicodeError):
             continue
     return "\n".join(results) or "(일치 없음)"
 
 @tool
-def read_text_file(path: str) -> str:
-    """텍스트 파일을 여러 한국어 인코딩으로 안전하게 읽습니다."""
-    target = os.path.abspath(os.path.expanduser(path))
-    raw = Path(target).read_bytes()
-    for enc in ("utf-8", "utf-8-sig", "cp949", "euc-kr"):
-        try:
-            return raw.decode(enc)
-        except UnicodeDecodeError:
-            pass
-    return raw.decode("utf-8", errors="replace")
-
-@tool
 def sha256_file(path: str) -> str:
     """파일의 SHA-256 해시를 계산합니다."""
-    h = hashlib.sha256()
-    with open(os.path.abspath(os.path.expanduser(path)), "rb") as f:
-        for chunk in iter(lambda: f.read(1024 * 1024), b""):
-            h.update(chunk)
-    return h.hexdigest()
+    try:
+        target = _workspace_path(path, must_exist=True)
+        h = hashlib.sha256()
+        with open(target, "rb") as f:
+            for chunk in iter(lambda: f.read(1024 * 1024), b""):
+                h.update(chunk)
+        return h.hexdigest()
+    except Exception as exc:
+        return f"SHA-256 계산 오류: {exc}"
 
 @tool
 def json_format(text: str) -> str:
@@ -846,7 +889,7 @@ def json_format(text: str) -> str:
 @tool
 def csv_summary(path: str) -> str:
     """CSV 파일의 행/열 수와 앞부분을 요약합니다."""
-    df = pd.read_csv(os.path.abspath(os.path.expanduser(path)))
+    df = pd.read_csv(_workspace_path(path, must_exist=True))
     return json.dumps({
         "rows": int(len(df)), "columns": list(df.columns),
         "head": df.head(10).to_dict(orient="records")
@@ -867,7 +910,7 @@ def fetch_url(url: str) -> str:
 @tool
 def download_url(url: str, path: str) -> str:
     """URL의 파일을 현재 환경에 다운로드합니다."""
-    target = os.path.abspath(os.path.expanduser(path))
+    target = _workspace_path(path)
     Path(target).parent.mkdir(parents=True, exist_ok=True)
     with requests.get(url, stream=True, timeout=60, headers={"User-Agent": "Mozilla/5.0"}) as r:
         r.raise_for_status()
@@ -925,27 +968,52 @@ def environment_variable(name: str) -> str:
 
 @tool
 def zip_create(source: str, archive: str) -> str:
-    """파일 또는 폴더를 ZIP으로 압축합니다."""
-    src = os.path.abspath(os.path.expanduser(source))
-    dst = os.path.abspath(os.path.expanduser(archive))
-    base = os.path.splitext(dst)[0]
-    shutil.make_archive(base, "zip", root_dir=os.path.dirname(src), base_dir=os.path.basename(src))
-    return f"압축 완료: {base}.zip"
+    """현재 작업 폴더 안의 파일 또는 폴더를 ZIP으로 압축합니다."""
+    try:
+        src = _workspace_path(source, must_exist=True)
+        dst = _workspace_path(archive)
+        base = os.path.splitext(dst)[0]
+        shutil.make_archive(base, "zip", root_dir=os.path.dirname(src), base_dir=os.path.basename(src))
+        return f"압축 완료: {base}.zip"
+    except Exception as exc:
+        return f"압축 오류: {exc}"
 
 @tool
 def zip_extract(archive: str, destination: str = ".") -> str:
-    """ZIP 파일을 지정 폴더에 압축 해제합니다."""
-    dst = os.path.abspath(os.path.expanduser(destination))
-    Path(dst).mkdir(parents=True, exist_ok=True)
-    with zipfile.ZipFile(os.path.abspath(os.path.expanduser(archive))) as z:
-        z.extractall(dst)
-    return f"압축 해제 완료: {dst}"
+    """ZIP을 현재 작업 폴더 안에서 안전하게 압축 해제합니다."""
+    try:
+        archive_path = _workspace_path(archive, must_exist=True)
+        dst = Path(_workspace_path(destination))
+        dst.mkdir(parents=True, exist_ok=True)
+        with zipfile.ZipFile(archive_path) as z:
+            root = dst.resolve()
+            total_uncompressed = 0
+            max_total_uncompressed = 50 * 1024 * 1024 * 1024
+            max_member_uncompressed = 10 * 1024 * 1024 * 1024
+            for info in z.infolist():
+                if info.file_size > max_member_uncompressed or total_uncompressed + info.file_size > max_total_uncompressed:
+                    return "압축 해제 차단: 비정상적으로 큰 압축 해제 크기입니다."
+                total_uncompressed += info.file_size
+                member = (dst / info.filename).resolve()
+                try:
+                    member.relative_to(root)
+                except ValueError:
+                    return f"압축 해제 차단: 위험한 경로 {info.filename}"
+                if info.is_dir():
+                    member.mkdir(parents=True, exist_ok=True)
+                else:
+                    member.parent.mkdir(parents=True, exist_ok=True)
+                    with z.open(info) as src, open(member, "wb") as out:
+                        shutil.copyfileobj(src, out, length=1024 * 1024)
+        return f"압축 해제 완료: {dst}"
+    except Exception as exc:
+        return f"압축 해제 오류: {exc}"
 
 @tool
 def list_processes() -> str:
     """현재 실행 중인 프로세스를 조회합니다. 운영체제 기본 명령만 사용합니다."""
     cmd = ["tasklist"] if os.name == "nt" else ["ps", "-eo", "pid,comm,%cpu,%mem"]
-    result = _subprocess.run(cmd, capture_output=True, text=True, errors="replace")
+    result = _subprocess.run(cmd, capture_output=True, text=True, errors="replace", timeout=15)
     return result.stdout[:30000]
 
 @tool
@@ -966,23 +1034,45 @@ def url_parse(url: str) -> str:
 
 @tool
 def find_duplicates(path: str = ".") -> str:
-    """폴더 아래 파일을 SHA-256으로 비교하여 중복 파일 그룹을 찾습니다."""
-    root = os.path.abspath(os.path.expanduser(path))
-    groups = {}
-    for fp in glob.glob(os.path.join(root, "**", "*"), recursive=True):
-        if os.path.isfile(fp):
+    """크기와 청크 해시를 먼저 비교한 뒤 전체 SHA-256으로 중복 파일을 찾습니다."""
+    try:
+        root = _workspace_path(path, must_exist=True)
+        by_size = {}
+        for file_path in _iter_workspace_files(root):
             try:
-                digest = hashlib.sha256(Path(fp).read_bytes()).hexdigest()
-                groups.setdefault(digest, []).append(fp)
-            except Exception:
-                pass
-    duplicates = [v for v in groups.values() if len(v) > 1]
-    return json.dumps(duplicates, ensure_ascii=False, indent=2)
+                by_size.setdefault(file_path.stat().st_size, []).append(file_path)
+            except OSError:
+                continue
+        groups = {}
+        for size, paths in by_size.items():
+            if len(paths) < 2:
+                continue
+            by_probe = {}
+            for fp in paths:
+                try:
+                    with open(fp, "rb") as fh:
+                        probe = fh.read(1024 * 1024)
+                    by_probe.setdefault(hashlib.sha256(probe).digest(), []).append(fp)
+                except OSError:
+                    continue
+            for _, candidates in by_probe.items():
+                if len(candidates) < 2:
+                    continue
+                for fp in candidates:
+                    h = hashlib.sha256()
+                    with open(fp, "rb") as fh:
+                        for chunk in iter(lambda: fh.read(1024 * 1024), b""):
+                            h.update(chunk)
+                    groups.setdefault(h.hexdigest(), []).append(str(fp))
+        duplicates = [v for v in groups.values() if len(v) > 1]
+        return json.dumps(duplicates, ensure_ascii=False, indent=2)
+    except Exception as exc:
+        return f"중복 파일 검색 오류: {exc}"
 
 @tool
 def disk_usage(path: str = ".") -> str:
     """지정 경로가 있는 디스크의 총/사용/가용 용량을 반환합니다."""
-    total, used, free = shutil.disk_usage(os.path.abspath(os.path.expanduser(path)))
+    total, used, free = shutil.disk_usage(_workspace_path(path, must_exist=True))
     return json.dumps({
         "total_bytes": total, "used_bytes": used, "free_bytes": free
     }, ensure_ascii=False, indent=2)
@@ -1256,7 +1346,7 @@ tools.extend(_LANGUAGE_REPL_TOOLS)
 # always accessed on the same Playwright event loop.
 
 class _AsyncPlaywrightBridge:
-    def __init__(self):
+    def __init__(self, wait_for_ready: bool = False):
         self.loop = None
         self.thread = None
         self.ready = threading.Event()
@@ -1272,13 +1362,12 @@ class _AsyncPlaywrightBridge:
         )
         self.thread.start()
 
-        if not self.ready.wait(timeout=60):
-            raise RuntimeError(
-                "Playwright async 초기화 시간 초과"
-            )
-
-        if self.init_error is not None:
-            raise self.init_error
+        # 앱 시작을 Playwright 초기화가 막지 않도록 기본적으로 백그라운드 초기화합니다.
+        if wait_for_ready:
+            if not self.ready.wait(timeout=300):
+                raise RuntimeError("Playwright async 초기화 시간 초과(300초)")
+            if self.init_error is not None:
+                raise self.init_error
 
     def _thread_main(self):
         try:
@@ -1301,9 +1390,23 @@ class _AsyncPlaywrightBridge:
         from playwright.async_api import async_playwright
 
         self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True
-        )
+
+        last_error = None
+        for attempt in range(1, 4):
+            try:
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    timeout=120_000,
+                )
+                break
+            except Exception as exc:
+                last_error = exc
+                if attempt >= 3:
+                    raise
+                await asyncio.sleep(2 * attempt)
+
+        if self.browser is None and last_error is not None:
+            raise last_error
 
         toolkit = PWBT.from_browser(
             async_browser=self.browser
@@ -1337,7 +1440,8 @@ class _AsyncPlaywrightBridge:
             self.loop,
         )
 
-        return future.result(timeout=300)
+        # 페이지 로딩/네비게이션/첫 브라우저 실행이 긴 경우도 정상적으로 기다립니다.
+        return future.result(timeout=900)
 
 
 def _make_playwright_proxy(
@@ -1360,29 +1464,35 @@ def _make_playwright_proxy(
 
 
 _playwright_bridge = None
+_PLAYWRIGHT_TOOL_NAMES: set[str] = set()
 
 try:
-    _playwright_bridge = _AsyncPlaywrightBridge()
-
-    _playwright_original_tools = list(
-        _playwright_bridge.tools.values()
-    )
-
-    tools += [
-        _make_playwright_proxy(
-            _playwright_bridge,
-            playwright_tool,
-        )
-        for playwright_tool
-        in _playwright_original_tools
-    ]
-
+    # 브라우저를 앱 시작과 동시에 준비하지만 Streamlit 첫 화면을 기다리게 하지 않습니다.
+    _playwright_bridge = _AsyncPlaywrightBridge(wait_for_ready=False)
 except Exception as _playwright_error:
-    print(
-        "[PLAYWRIGHT] async initialization failed:",
-        repr(_playwright_error),
-    )
+    print("[PLAYWRIGHT] background initialization failed:", repr(_playwright_error))
     _playwright_bridge = None
+
+def _ensure_playwright_tools(timeout: float = 180.0) -> bool:
+    """브라우저 도구가 실제로 필요할 때만 준비 완료를 기다립니다."""
+    global _playwright_bridge
+    if _playwright_bridge is None:
+        return False
+    if not _playwright_bridge.ready.wait(timeout=timeout):
+        print("[PLAYWRIGHT] tool initialization timed out")
+        return False
+    if _playwright_bridge.init_error is not None:
+        print("[PLAYWRIGHT] initialization error:", repr(_playwright_bridge.init_error))
+        return False
+    if not _PLAYWRIGHT_TOOL_NAMES:
+        originals = list(_playwright_bridge.tools.values())
+        for original in originals:
+            if original.name in _PLAYWRIGHT_TOOL_NAMES:
+                continue
+            tools.append(_make_playwright_proxy(_playwright_bridge, original))
+            _PLAYWRIGHT_TOOL_NAMES.add(original.name)
+        print("[PLAYWRIGHT] tools registered:", sorted(_PLAYWRIGHT_TOOL_NAMES))
+    return bool(_PLAYWRIGHT_TOOL_NAMES)
 
 
 # ShellTool의 명령 인자가 모델에 의해 [ ... ] 형태로 생성되는 경우를
@@ -1446,23 +1556,28 @@ for _tool_index, _existing_tool in enumerate(list(tools)):
                 # ShellTool 내부의 고정 UTF-8 디코딩 때문에 Windows CP949 출력이
                 # 발생하면 UnicodeDecodeError가 날 수 있으므로, 여기서는 bytes로
                 # 받은 뒤 UTF-8 -> CP949 -> EUC-KR 순으로 직접 디코딩합니다.
-                completed = subprocess.run(
+                creationflags = getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0) if os.name == "nt" else 0
+                proc = subprocess.Popen(
                     normalized,
                     shell=True,
                     stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                     stdin=subprocess.DEVNULL,
-                    check=False,
+                    creationflags=creationflags,
                 )
+                try:
+                    stdout, _ = proc.communicate(timeout=120)
+                except subprocess.TimeoutExpired:
+                    if os.name == "nt":
+                        subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True)
+                    else:
+                        proc.kill()
+                    stdout, _ = proc.communicate()
+                    return _decode_terminal_bytes(stdout).rstrip() + "\n[터미널 실행 시간 초과: 120초]"
 
-                output = _decode_terminal_bytes(completed.stdout)
-
-                if completed.returncode != 0:
-                    return (
-                        f"{output.rstrip()}\n"
-                        f"[exit code: {completed.returncode}]"
-                    ).strip()
-
+                output = _decode_terminal_bytes(stdout)
+                if proc.returncode != 0:
+                    return (f"{output.rstrip()}\n[exit code: {proc.returncode}]").strip()
                 return output.rstrip()
 
             except Exception as exc:
@@ -2258,6 +2373,60 @@ def _json_safe(value):
         return str(value)
 
 
+def _format_execution_error(exc: BaseException) -> str:
+    """실행/서버 오류를 사용자에게 상황별 메시지로 변환합니다."""
+    if isinstance(exc, RuntimeError) or any(
+        cls.__name__ == "RuntimeError" for cls in type(exc).__mro__
+    ):
+        return "대화가 너무 깁니다.새로운 대화를 생성하세요!"
+
+    name = type(exc).__name__
+    text = str(exc).strip()
+
+    status_code = getattr(exc, "status_code", None)
+    response = getattr(exc, "response", None)
+    if status_code is None and response is not None:
+        status_code = getattr(response, "status_code", None)
+
+    if name in {"TimeoutError", "ConnectTimeout", "ReadTimeout", "WriteTimeout"} or "timeout" in name.lower():
+        return "서버 응답 시간이 초과되었습니다. 잠시 후 다시 시도하세요."
+
+    if name in {"ConnectionError", "ConnectError", "RemoteProtocolError"} or "connection" in name.lower():
+        return "AI 서버에 연결하지 못했습니다. 서버 상태를 확인한 뒤 다시 시도하세요."
+
+    if status_code is not None:
+        try:
+            status_code = int(status_code)
+        except Exception:
+            status_code = None
+
+    if status_code is not None:
+        if status_code == 401:
+            return "AI 서버 인증에 실패했습니다. 서버 인증 설정을 확인하세요."
+        if status_code == 403:
+            return "AI 서버 접근이 거부되었습니다. 접근 권한을 확인하세요."
+        if status_code == 429:
+            return "AI 서버 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요."
+        if status_code >= 500:
+            return f"AI 서버에서 오류가 발생했습니다. (HTTP {status_code})"
+
+    lowered = text.lower()
+    if "rate limit" in lowered or "too many requests" in lowered:
+        return "AI 서버 요청 한도를 초과했습니다. 잠시 후 다시 시도하세요."
+    if "authentication" in lowered or "unauthorized" in lowered:
+        return "AI 서버 인증에 실패했습니다. 서버 인증 설정을 확인하세요."
+    if "server error" in lowered or "internal server error" in lowered:
+        return "AI 서버에서 오류가 발생했습니다. 잠시 후 다시 시도하세요."
+
+    if text:
+        return f"실행 중 오류가 발생했습니다: {text}"
+    return f"실행 중 오류가 발생했습니다: {name}"
+
+
+def _format_tool_error(exc: BaseException) -> str:
+    return _format_execution_error(exc)
+
+
 def _serialize_message(message):
     data = {
         "id": getattr(message, "id", None),
@@ -2398,6 +2567,7 @@ def _new_chat_record():
             _serialize_message(SM(content=REACT_SYSTEM_PROMPT))
         ],
         "todos": [],
+        "execution": None,
     }
 
 
@@ -2450,6 +2620,7 @@ def _load_chat_store():
             chat.setdefault("updated_at", chat["created_at"])
             chat.setdefault("messages", [])
             chat.setdefault("todos", [])
+            chat.setdefault("execution", None)
             normalized.append(chat)
 
         if not normalized:
@@ -2541,6 +2712,51 @@ def _get_active_chat_record():
     store["active_chat_id"] = chat["id"]
     _save_chat_store(store)
     return chat
+
+
+def _get_pending_execution() -> Optional[dict[str, Any]]:
+    chat = _get_active_chat_record()
+    execution = chat.get("execution")
+    if not isinstance(execution, dict):
+        return None
+    if execution.get("status") != "running":
+        return None
+    return dict(execution)
+
+
+def _begin_chat_execution(
+    run_id: str,
+    mode: str,
+    input_text: str = "",
+) -> None:
+    chat = _get_active_chat_record()
+    st.session_state["execution_locked"] = True
+    chat["execution"] = {
+        "run_id": str(run_id),
+        "mode": str(mode),
+        "input_text": str(input_text or ""),
+        "status": "running",
+        "started_at": datetime.now().isoformat(timespec="seconds"),
+        "updated_at": datetime.now().isoformat(timespec="seconds"),
+    }
+    _save_chat_store(_ensure_chat_store())
+
+
+def _finish_chat_execution(
+    status: str = "completed",
+    error: Optional[str] = None,
+) -> None:
+    chat = _get_active_chat_record()
+    execution = chat.get("execution")
+    if not isinstance(execution, dict):
+        return
+    execution["status"] = str(status)
+    execution["updated_at"] = datetime.now().isoformat(timespec="seconds")
+    if error:
+        execution["error"] = str(error)
+    chat["execution"] = execution
+    st.session_state["execution_locked"] = execution.get("status") == "running"
+    _save_chat_store(_ensure_chat_store())
 
 
 def _message_fingerprint(message):
@@ -2679,6 +2895,7 @@ def _delete_current_chat():
 
 
 def _render_chat_sidebar():
+    sidebar_locked = bool(st.session_state.get("execution_locked", False)) or bool(_get_pending_execution())
     st.sidebar.markdown(
         """
         <style>
@@ -2702,6 +2919,7 @@ def _render_chat_sidebar():
         "＋ 새 채팅",
         key="sidebar_new_chat",
         use_container_width=True,
+        disabled=sidebar_locked,
     ):
         _start_new_chat()
         st.rerun()
@@ -2730,6 +2948,7 @@ def _render_chat_sidebar():
             prefix + title,
             key=f"sidebar_chat_{chat_id}",
             use_container_width=True,
+            disabled=sidebar_locked,
         ):
             if chat_id != active_id:
                 _switch_chat(chat_id)
@@ -2741,6 +2960,7 @@ def _render_chat_sidebar():
         "🗑️ 현재 대화 삭제",
         key="sidebar_delete_current",
         use_container_width=True,
+        disabled=sidebar_locked,
     ):
         _delete_current_chat()
         st.rerun()
@@ -2761,8 +2981,10 @@ RETRIEVER_ROOT.mkdir(parents=True, exist_ok=True)
 RETRIEVER_MANIFEST = RETRIEVER_ROOT / "manifest.json"
 FILE_RETRIEVER_TOOLS: dict[str, Any] = {}
 FILE_RETRIEVER_META: dict[str, dict[str, Any]] = {}
+FILE_LOAD_ERRORS: dict[str, list[str]] = {}
 _RETRIEVER_LOCK = threading.RLock()
 _RETRIEVER_EMBEDDER = None
+_RETRIEVER_CACHE: dict[str, Any] = {}
 
 _MEDIA_PREFIXES = ("image/", "audio/", "video/")
 _TEXT_EXTENSIONS = {
@@ -2789,10 +3011,13 @@ def _get_openclip_embedder():
     return _RETRIEVER_EMBEDDER
 
 
+def _file_fingerprint(path: str) -> str:
+    st = os.stat(path)
+    return hashlib.sha256(f"{os.path.abspath(path)}|{st.st_size}|{st.st_mtime_ns}".encode("utf-8")).hexdigest()[:20]
+
 def _safe_filename_key(path: str) -> str:
     stem = re.sub(r"[^A-Za-z0-9_가-힣]+", "_", Path(path).stem).strip("_") or "file"
-    digest = hashlib.sha256(os.path.abspath(path).encode("utf-8")).hexdigest()[:12]
-    return f"{stem[:28]}_{digest}"
+    return f"{stem[:28]}_{_file_fingerprint(path)}"
 
 
 def _decode_file_bytes(raw: bytes) -> str:
@@ -2816,6 +3041,7 @@ def _document_from_text(text: str, path: str, extra: Optional[dict[str, Any]] = 
 
 def _load_file_documents(path: str):
     path = os.path.abspath(path)
+    loader_errors = []
     suffix = Path(path).suffix.lower()
 
     # Native document loaders when installed.
@@ -2823,27 +3049,27 @@ def _load_file_documents(path: str):
         try:
             from langchain_community.document_loaders import PyPDFLoader
             return PyPDFLoader(path).load()
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".docx", ".doc"}:
         try:
             from langchain_community.document_loaders import Docx2txtLoader
             return Docx2txtLoader(path).load()
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
         try:
             from langchain_community.document_loaders import UnstructuredWordDocumentLoader
             return UnstructuredWordDocumentLoader(path).load()
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".pptx", ".ppt"}:
         try:
             from langchain_community.document_loaders import UnstructuredPowerPointLoader
             return UnstructuredPowerPointLoader(path).load()
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".xlsx", ".xls", ".xlsm", ".ods"}:
         try:
@@ -2852,16 +3078,16 @@ def _load_file_documents(path: str):
             for sheet_name, frame in sheets.items():
                 docs.append(_document_from_text(frame.to_csv(index=False), path, {"sheet": str(sheet_name), "format": "spreadsheet"}))
             return docs
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".csv", ".tsv"}:
         try:
             sep = "\t" if suffix == ".tsv" else ","
             frame = pd.read_csv(path, sep=sep)
             return [_document_from_text(frame.to_csv(index=False), path, {"format": "csv"})]
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix == ".ipynb":
         try:
@@ -2872,15 +3098,15 @@ def _load_file_documents(path: str):
                 if src:
                     parts.append(f"[{cell.get('cell_type','cell')}]\n{src}")
             return [_document_from_text("\n\n".join(parts), path, {"format": "jupyter-notebook"})]
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".epub"}:
         try:
             from langchain_community.document_loaders import UnstructuredEPubLoader
             return UnstructuredEPubLoader(path).load()
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".html", ".htm"}:
         try:
@@ -2888,8 +3114,8 @@ def _load_file_documents(path: str):
             raw = Path(path).read_bytes()
             soup = BeautifulSoup(_decode_file_bytes(raw), "html.parser")
             return [_document_from_text(soup.get_text("\n", strip=True), path, {"format": "html"})]
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in {".zip"}:
         docs = []
@@ -2903,18 +3129,18 @@ def _load_file_documents(path: str):
                         try:
                             text = _decode_file_bytes(archive.read(name))
                             docs.append(_document_from_text(text, f"{path}::{name}", {"archive_member": name}))
-                        except Exception:
-                            pass
+                        except Exception as exc:
+                            loader_errors.append(f"{suffix}:{name}: {type(exc).__name__}: {exc}")
             if docs:
                 return docs
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     if suffix in _TEXT_EXTENSIONS or suffix in _CODE_EXTENSIONS:
         try:
             return [_document_from_text(_decode_file_bytes(Path(path).read_bytes()), path, {"format": "text/code"})]
-        except Exception:
-            pass
+        except Exception as exc:
+            loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     # Best-effort broad format support via Unstructured when available.
     try:
@@ -2922,8 +3148,8 @@ def _load_file_documents(path: str):
         docs = UnstructuredFileLoader(path, strategy="fast").load()
         if docs:
             return docs
-    except Exception:
-        pass
+    except Exception as exc:
+        loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
     # 마지막 안전장치: printable text 추출. "읽었다"고 거짓말하지 않고
     # 실제 파일에서 읽을 수 있는 문자열만 색인합니다.
@@ -2933,9 +3159,10 @@ def _load_file_documents(path: str):
         text = "\n".join(_decode_file_bytes(x) for x in strings[:10000])
         if text.strip():
             return [_document_from_text(text, path, {"format": "binary-printable-strings"})]
-    except Exception:
-        pass
+    except Exception as exc:
+        loader_errors.append(f"{suffix}: {type(exc).__name__}: {exc}")
 
+    FILE_LOAD_ERRORS[path] = loader_errors[-10:]
     return []
 
 
@@ -2943,14 +3170,34 @@ def _build_file_retriever(path: str):
     path = os.path.abspath(path)
     key = _safe_filename_key(path)
     persist_dir = RETRIEVER_ROOT / key
-    collection_name = "file_" + hashlib.sha256(path.encode("utf-8")).hexdigest()[:20]
+    collection_name = "file_" + hashlib.sha256(key.encode("utf-8")).hexdigest()[:20]
 
     with _RETRIEVER_LOCK:
+        if key in _RETRIEVER_CACHE:
+            retriever, count = _RETRIEVER_CACHE[key]
+            return retriever, count, key
+
         embeddings = _get_openclip_embedder()
+        # 이미 동일 fingerprint의 영속 index가 있으면 재임베딩하지 않습니다.
+        if persist_dir.exists() and any(persist_dir.iterdir()):
+            try:
+                vectorstore = Chroma(
+                    collection_name=collection_name,
+                    persist_directory=str(persist_dir),
+                    embedding_function=embeddings,
+                )
+                count = int(vectorstore._collection.count())
+                if count > 0:
+                    retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+                    _RETRIEVER_CACHE[key] = (retriever, count)
+                    return retriever, count, key
+            except Exception:
+                pass
+
         splitter = RCTS(chunk_size=1200, chunk_overlap=160)
         documents = _load_file_documents(path)
         if not documents:
-            raise ValueError(f"지원 가능한 텍스트/문서 내용을 추출하지 못했습니다: {path}")
+            raise ValueError(f"지원 가능한 텍스트/문서 내용을 추출하지 못했습니다: {path}" + ("\n로드 시도 오류: " + " | ".join(FILE_LOAD_ERRORS.get(path, [])[-3:]) if FILE_LOAD_ERRORS.get(path) else ""))
         chunks = splitter.split_documents(documents)
         if not chunks:
             raise ValueError(f"파일에서 색인할 텍스트 청크가 없습니다: {path}")
@@ -2960,7 +3207,9 @@ def _build_file_retriever(path: str):
             collection_name=collection_name,
             persist_directory=str(persist_dir),
         )
-        return vectorstore.as_retriever(search_kwargs={"k": 6}), len(chunks), key
+        retriever = vectorstore.as_retriever(search_kwargs={"k": 6})
+        _RETRIEVER_CACHE[key] = (retriever, len(chunks))
+        return retriever, len(chunks), key
 
 
 def _register_file_retriever_tool(path: str, eager: bool = False) -> Optional[Any]:
@@ -2984,15 +3233,8 @@ def _register_file_retriever_tool(path: str, eager: bool = False) -> Optional[An
         if not os.path.exists(abs_path):
             return f"파일이 존재하지 않습니다: {abs_path}"
         try:
-            persist_dir = RETRIEVER_ROOT / name_key
-            collection_name = "file_" + hashlib.sha256(abs_path.encode("utf-8")).hexdigest()[:20]
-            embeddings = _get_openclip_embedder()
-            vectorstore = Chroma(
-                collection_name=collection_name,
-                persist_directory=str(persist_dir),
-                embedding_function=embeddings,
-            )
-            docs = vectorstore.similarity_search(str(query), k=max(1, min(int(max_results), 20)))
+            retriever, _, _ = _build_file_retriever(abs_path)
+            docs = retriever.invoke(str(query))[:max(1, min(int(max_results), 20))]
             if not docs:
                 return "관련 내용을 찾지 못했습니다."
             blocks = []
@@ -3011,6 +3253,7 @@ def _register_file_retriever_tool(path: str, eager: bool = False) -> Optional[An
         "path": abs_path,
         "tool_name": tool_name,
         "name_key": name_key,
+        "fingerprint": _file_fingerprint(abs_path),
     }
 
     # 실제 index 생성은 업로드 직후 수행할 수 있고, 실패해도 도구 자체는 등록됩니다.
@@ -3026,12 +3269,34 @@ def _register_file_retriever_tool(path: str, eager: bool = False) -> Optional[An
 def _save_retriever_manifest():
     data = []
     for meta in FILE_RETRIEVER_META.values():
-        data.append({"path": meta.get("path"), "tool_name": meta.get("tool_name"), "name_key": meta.get("name_key")})
+        data.append({"path": meta.get("path"), "tool_name": meta.get("tool_name"), "name_key": meta.get("name_key"), "fingerprint": meta.get("fingerprint")})
     try:
         RETRIEVER_MANIFEST.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception:
         pass
 
+
+def _cleanup_retriever_store():
+    """삭제된/오래된 파일의 retriever index와 manifest 항목을 정리합니다."""
+    try:
+        current = []
+        if RETRIEVER_MANIFEST.exists():
+            raw = json.loads(RETRIEVER_MANIFEST.read_text(encoding="utf-8"))
+            if isinstance(raw, list):
+                for item in raw:
+                    if isinstance(item, dict) and os.path.isfile(item.get("path", "")):
+                        current.append(item)
+        valid_keys = {item.get("name_key") for item in current}
+        for child in RETRIEVER_ROOT.iterdir():
+            if child.name == RETRIEVER_MANIFEST.name or child.name in valid_keys:
+                continue
+            if child.is_dir():
+                shutil.rmtree(child, ignore_errors=True)
+        RETRIEVER_MANIFEST.write_text(json.dumps(current, ensure_ascii=False, indent=2), encoding="utf-8")
+    except Exception as exc:
+        print("[RETRIEVER] cleanup failed:", repr(exc))
+
+_cleanup_retriever_store()
 
 def _restore_file_retriever_tools():
     if not RETRIEVER_MANIFEST.exists():
@@ -3058,7 +3323,7 @@ def _register_uploaded_retrievers(saved_paths: list[str]):
         mime, _ = mimetypes.guess_type(path)
         if (mime or "").lower().startswith(_MEDIA_PREFIXES):
             continue
-        tool_obj = _register_file_retriever_tool(path, eager=True)
+        tool_obj = _register_file_retriever_tool(path, eager=False)
         if tool_obj is None:
             continue
         if "REACT_BASE_TOOLS" in globals() and tool_obj not in REACT_BASE_TOOLS:
@@ -3298,7 +3563,7 @@ def _execute_one_subagent(run_id: str, job_id: str, task_name: str, prompt: str)
             job = _SUBAGENT_RUNS.get(run_id, {}).get("jobs", {}).get(job_id)
             if job is not None:
                 job["status"] = "failed"
-                job["result"] = f"서브에이전트 오류: {exc}"
+                job["result"] = _format_execution_error(exc)
                 job["finished_at"] = datetime.now().isoformat(timespec="seconds")
 
 
@@ -3397,22 +3662,58 @@ def subagent(
 
     # 모두 한 번에 제출하므로 순차 실행이 아니라 병렬 실행입니다.
     for job_id, job in jobs.items():
-        _SUBAGENT_EXECUTOR.submit(
-            _execute_one_subagent,
-            run_id,
-            job_id,
-            job["task_name"],
-            job["prompt"],
-        )
+        try:
+            _SUBAGENT_EXECUTOR.submit(
+                _execute_one_subagent,
+                run_id,
+                job_id,
+                job["task_name"],
+                job["prompt"],
+            )
+        except Exception as exc:
+            with _SUBAGENT_LOCK:
+                if job_id in _SUBAGENT_RUNS.get(run_id, {}).get("jobs", {}):
+                    _SUBAGENT_RUNS[run_id]["jobs"][job_id]["status"] = "failed"
+                    _SUBAGENT_RUNS[run_id]["jobs"][job_id]["result"] = _format_execution_error(exc)
+                    _SUBAGENT_RUNS[run_id]["jobs"][job_id]["finished_at"] = datetime.now().isoformat(timespec="seconds")
+
+    # 병렬 작업을 실제로 완료한 뒤에만 부모 에이전트로 결과를 반환합니다.
+    # 따라서 "서브에이전트를 실행하겠다"는 말만 남기고 다음 사용자 메시지를
+    # 기다리는 현상을 방지합니다.
+    deadline = time.time() + 900
+    while _subagent_has_pending(run_id) and time.time() < deadline:
+        time.sleep(0.2)
+
+    final_snapshot = _subagent_run_snapshot(run_id) or {}
+    final_jobs = list((final_snapshot.get("jobs", {}) or {}).values())
+    still_pending = any(
+        job.get("status") in {"queued", "running"}
+        for job in final_jobs
+    )
+
+    if still_pending:
+        result_status = "timeout"
+        result_message = "일부 서브에이전트 작업이 900초 안에 끝나지 않았습니다."
+    elif final_jobs and all(job.get("status") == "completed" for job in final_jobs):
+        result_status = "completed"
+        result_message = "모든 서브에이전트 작업이 실제로 완료되었습니다."
+    else:
+        result_status = "completed_with_errors"
+        result_message = "서브에이전트 작업이 종료되었지만 일부 작업이 실패했습니다."
 
     return json.dumps(
         {
-            "status": "started",
+            "status": result_status,
             "group_id": group_id,
-            "message": "모든 서브에이전트 작업을 병렬로 시작했습니다. 기존 에이전트는 다른 작업을 계속할 수 있습니다.",
+            "message": result_message,
             "jobs": [
-                {"job_id": j["job_id"], "task_name": j["task_name"], "status": j["status"]}
-                for j in jobs.values()
+                {
+                    "job_id": j.get("job_id"),
+                    "task_name": j.get("task_name"),
+                    "status": j.get("status"),
+                    "result": j.get("result", ""),
+                }
+                for j in final_jobs
             ],
         },
         ensure_ascii=False,
@@ -3461,11 +3762,93 @@ REACT_SYSTEM_PROMPT = user_instructions + r"""
 """
 
 
+_TOOL_INTENT_HINTS = (
+    "해보겠습니다",
+    "해볼게요",
+    "하겠습니다",
+    "확인해보겠습니다",
+    "확인할게요",
+    "살펴보겠습니다",
+    "검색해보겠습니다",
+    "검색할게요",
+    "찾아보겠습니다",
+    "찾아볼게요",
+    "읽어보겠습니다",
+    "읽어볼게요",
+    "실행하겠습니다",
+    "실행할게요",
+    "수정하겠습니다",
+    "수정할게요",
+    "삭제하겠습니다",
+    "삭제할게요",
+    "다운로드하겠습니다",
+    "다운로드할게요",
+    "생성하겠습니다",
+    "생성할게요",
+    "브라우저를 열",
+    "브라우저에서 확인",
+    "파일을 확인",
+    "파일을 읽",
+    "폴더를 확인",
+)
+
+
+def _request_likely_requires_tool(messages: list[Any]) -> bool:
+    """사용자 요청이 실제 행동을 요구하는지 빠르게 판별합니다."""
+    for message in reversed(messages):
+        if isinstance(message, HM):
+            text = _content_to_text(getattr(message, "content", "")).casefold()
+            if any(k in text for k in (
+                "검색", "찾아", "읽어", "수정", "삭제", "생성", "만들어", "실행",
+                "다운로드", "업로드", "설치", "계산", "분석", "변환", "브라우저",
+                "파일", "폴더", "코드", "터미널", "python", "사이트", "검색해",
+            )):
+                return True
+            return False
+    return False
+
+def _needs_tool_execution_retry(response: Any) -> bool:
+    if not response:
+        return False
+    if getattr(response, "tool_calls", None):
+        return False
+    content = _content_to_text(getattr(response, "content", "")).strip()
+    if not content:
+        return False
+    lower = content.casefold()
+    return any(hint.casefold() in lower for hint in _TOOL_INTENT_HINTS)
+
+
+def _compact_messages_for_model(messages: list[Any], max_messages: int = 80, max_tool_chars: int = 12000) -> list[Any]:
+    """저장 기록은 유지하면서 모델에 보내는 컨텍스트만 가볍게 줄입니다."""
+    if not messages:
+        return messages
+    system = [m for m in messages if isinstance(m, SM)]
+    body = [m for m in messages if not isinstance(m, SM)]
+    if len(body) > max_messages:
+        body = body[-max_messages:]
+    compacted = []
+    for message in body:
+        if isinstance(message, TM):
+            content = _content_to_text(getattr(message, "content", ""))
+            if len(content) > max_tool_chars:
+                content = content[:max_tool_chars] + "\n[도구 결과가 너무 길어 일부만 모델에 전달됨]"
+            compacted.append(TM(content=content, tool_call_id=getattr(message, "tool_call_id", "")))
+        else:
+            compacted.append(message)
+    return system[:1] + compacted
+
+_REACT_GRAPH_CACHE: dict[tuple[Any, ...], Any] = {}
+
 def _build_react_graph(toolset: list[Any]):
     bound_llm = llm.bind_tools(toolset)
+    try:
+        required_tool_llm = llm.bind_tools(toolset, tool_choice="required")
+    except Exception:
+        required_tool_llm = None
 
     def model_node(state: ReactGraphState):
-        messages = list(state["messages"])
+        messages = _compact_messages_for_model(list(state["messages"]))
         injected = _subagent_completed_for_run(_ACTIVE_SUBAGENT_RUN_ID, mark_delivered=True)
         if injected:
             result_text = []
@@ -3485,6 +3868,26 @@ def _build_react_graph(toolset: list[Any]):
             messages = [SM(content=REACT_SYSTEM_PROMPT), *messages]
 
         response = bound_llm.invoke(messages)
+
+        # 실제 행동 요청인데 tool_call이 빠진 경우에는 같은 턴에서 도구 호출을 다시 요구합니다.
+        if not getattr(response, "tool_calls", None) and (
+            _needs_tool_execution_retry(response) or _request_likely_requires_tool(messages)
+        ):
+            retry_messages = [
+                *messages,
+                response,
+                HM(content=(
+                    "방금 응답은 실제 도구 호출 없이 작업을 하겠다고만 말했습니다. "
+                    "사용자의 요청을 지금 실제로 수행해야 합니다. "
+                    "사용 가능한 도구가 있다면 이번 응답에서 반드시 실제 tool call을 생성하고, "
+                    "도구 실행 결과를 받은 뒤에만 사용자에게 완료/결과를 말하세요."
+                )),
+            ]
+            if required_tool_llm is not None:
+                response = required_tool_llm.invoke(retry_messages)
+            else:
+                response = bound_llm.invoke(retry_messages)
+
         return {"messages": [response]}
 
     def route_after_model(state: ReactGraphState):
@@ -3508,7 +3911,13 @@ def _build_react_graph(toolset: list[Any]):
 
     graph = StateGraph(ReactGraphState)
     graph.add_node("agent", model_node)
-    graph.add_node("tools", ToolNode(toolset))
+    graph.add_node(
+        "tools",
+        ToolNode(
+            toolset,
+            handle_tool_errors=_format_tool_error,
+        ),
+    )
     graph.add_node("wait_subagents", wait_subagents_node)
     graph.add_edge(START, "agent")
     graph.add_conditional_edges(
@@ -3521,16 +3930,32 @@ def _build_react_graph(toolset: list[Any]):
     return graph.compile()
 
 
-# 기본 graph는 앱 시작 시에도 준비해 두고, 실제 요청 직전에 동적 retriever가 반영된 graph를 다시 만듭니다.
-react_agent = _build_react_graph(REACT_TOOLS)
+# 실제 요청 직전에 필요한 도구가 반영된 graph를 지연 생성합니다.
 
+def _get_cached_react_graph(toolset: list[Any]):
+    key = (id(llm), tuple(sorted({getattr(t, "name", str(t)) for t in toolset})))
+    graph = _REACT_GRAPH_CACHE.get(key)
+    if graph is None:
+        graph = _build_react_graph(toolset)
+        _REACT_GRAPH_CACHE[key] = graph
+        # 세션 중 무한히 도구가 추가되는 경우 메모리가 커지지 않도록 최근 8개만 유지합니다.
+        if len(_REACT_GRAPH_CACHE) > 8:
+            for old_key in list(_REACT_GRAPH_CACHE)[:-8]:
+                _REACT_GRAPH_CACHE.pop(old_key, None)
+    return graph
 
 def _prepare_active_react_graphs():
     global _ACTIVE_SUBAGENT_NO_SUB_GRAPH
+    _ensure_playwright_tools(timeout=180.0)
     base_tools = list(REACT_BASE_TOOLS)
+    known_names = {getattr(x, "name", str(x)) for x in base_tools}
+    for _t in tools:
+        if getattr(_t, "name", str(_t)) not in known_names:
+            base_tools.append(_t)
+            known_names.add(getattr(_t, "name", str(_t)))
     parent_tools = list(base_tools) + [subagent]
-    _ACTIVE_SUBAGENT_NO_SUB_GRAPH = _build_react_graph(base_tools)
-    return _build_react_graph(parent_tools)
+    _ACTIVE_SUBAGENT_NO_SUB_GRAPH = _get_cached_react_graph(base_tools)
+    return _get_cached_react_graph(parent_tools)
 
 
 # 저장된 대화를 불러오고 사이드바를 구성합니다.
@@ -3547,77 +3972,65 @@ st.title("안녕하세요 **소윤** 입니다!")
 
 
 def _auto_select_execution_mode(user_input):
-    """작업의 복잡도에 따라 실행 방식을 자동으로 선택합니다.
-
-    ReAct                  : 단순 질문/단일 행동
-    SinglePathPlanGeneration: 순차적인 여러 단계가 필요한 작업
-    MultiPathPlanGeneration : 조사/비교처럼 여러 접근법이 유용한 작업
-    RoleBasedCoorperation   : 대규모·복합 작업으로 역할 분담이 유리한 작업
-    """
+    """문자열 길이가 아니라 작업 구조와 요구되는 실행 복잡도로 모드를 선택합니다."""
     text = str(getattr(user_input, "text", "") or "").strip()
     files = list(getattr(user_input, "files", []) or [])
+    lower = text.casefold()
 
-    score = 0
+    # 1) 실제 행동/도구 요구의 종류
+    action_groups = {
+        "file": ("파일", "폴더", "읽어", "수정", "삭제", "생성", "업로드", "다운로드", "압축", "코드"),
+        "web": ("검색", "찾아", "인터넷", "웹", "사이트", "브라우저", "최신", "출처"),
+        "compute": ("계산", "실행", "설치", "분석", "변환", "학습", "테스트", "디버깅"),
+        "research": ("조사", "논문", "자료", "근거", "비교", "검증", "리서치", "출처"),
+        "planning": ("계획", "단계", "순서", "먼저", "그다음", "이후", "마지막", "자동화"),
+    }
+    active_groups = sum(any(k in lower for k in words) for words in action_groups.values())
 
-    # 입력 자체의 규모
-    if len(text) >= 300:
-        score += 2
-    elif len(text) >= 120:
-        score += 1
+    # 2) 의존 관계: 앞 단계 결과가 다음 단계에 필요한지
+    dependency_markers = (
+        "그 결과", "결과를 바탕", "찾은 뒤", "확인한 뒤", "완료한 뒤",
+        "먼저", "이후", "다음으로", "그다음", "마지막으로", "순서대로",
+    )
+    dependencies = sum(marker in lower for marker in dependency_markers)
 
-    # 첨부 파일은 작업 규모를 증가시킴
-    score += min(len(files), 3)
+    # 3) 병렬/분기 구조
+    parallel_markers = ("동시에", "병렬", "각각", "여러 개", "여러 관점", "여러 방법", "각 분야")
+    parallel = sum(marker in lower for marker in parallel_markers)
 
-    lower = text.lower()
+    # 4) 결과물/품질 제약의 수
+    constraint_markers = (
+        "형식", "조건", "규칙", "제한", "반드시", "꼭", "정확", "검증",
+        "인용", "출처", "예외", "오류", "품질", "기준", "체크",
+    )
+    constraints = sum(marker in lower for marker in constraint_markers)
 
-    # 여러 단계/실행이 필요한 표현
-    multi_step_keywords = [
-        "만들어", "작성", "정리", "분석", "조사", "찾아", "검색",
-        "수집", "비교", "계획", "보고서", "파일", "폴더", "실행",
-        "여러", "단계", "자동화", "정리해", "분석해", "조사해",
-    ]
-    score += min(3, sum(1 for keyword in multi_step_keywords if keyword in lower))
+    # 5) 여러 대상/도메인 처리
+    domain_groups = {
+        "code": ("python", "javascript", "코드", "프로그램", "api", "개발"),
+        "data": ("csv", "json", "데이터", "엑셀", "표", "통계"),
+        "document": ("문서", "보고서", "pdf", "ppt", "word", "정리"),
+        "web": ("웹", "사이트", "브라우저", "검색"),
+        "media": ("이미지", "영상", "오디오", "음성"),
+    }
+    domains = sum(any(k in lower for k in words) for words in domain_groups.values())
 
-    # 비교/리서치/여러 출처를 요구하는 작업은 MultiPath 성격
-    research_keywords = [
-        "비교", "차이", "장단점", "여러 출처", "출처", "논문",
-        "최신", "자료", "리서치", "조사", "검색", "근거", "종합",
-    ]
-    research_score = sum(1 for keyword in research_keywords if keyword in lower)
+    # 6) 코드/구조 신호는 길이가 아니라 문법 구조 자체를 봅니다.
+    code_signal = int("```" in text or any(token in lower for token in ("import ", "def ", "class ", "function ", "traceback", "syntaxerror")))
 
-    # 역할 분담이 유리한 대규모 작업
-    large_keywords = [
-        "종합 보고서", "대규모", "심층", "철저하게", "포괄적으로",
-        "처음부터 끝까지", "전체 프로젝트", "여러 분야", "여러 관점",
-        "전문가", "역할", "협력", "깊이 있게", "상세하게 조사",
-    ]
-    large_score = sum(1 for keyword in large_keywords if keyword in lower)
+    # 7) 첨부 파일의 개수는 입력 문자열 길이와 무관한 실행 복잡도 신호입니다.
+    file_signal = 0 if not files else (1 if len(files) == 1 else 2 if len(files) <= 3 else 3)
 
-    # 작업 파일 수가 많거나 긴 요청이면 대규모 작업으로 간주
-    if len(files) >= 4:
-        large_score += 2
-    if len(text) >= 700:
-        large_score += 2
+    score = (active_groups * 2) + dependencies * 2 + parallel * 3 + constraints + domains + code_signal + file_signal
+    research_score = int(any(k in lower for k in ("비교", "논문", "최신", "근거", "출처", "조사", "검증"))) + max(0, domains - 1)
+    role_score = parallel + int(dependencies >= 2) + int(domains >= 3) + int(constraints >= 4) + int(file_signal >= 2)
 
-    # workspace 정보도 Path를 통해 확인하여 파일 관련 작업을 안정적으로 판별
-    workspace = Path.cwd()
-    if any(token in lower for token in ["현재 폴더", "작업 폴더", "프로젝트 폴더", "workspace"]):
-        try:
-            visible_files = sum(1 for item in workspace.iterdir() if item.is_file())
-            if visible_files >= 10:
-                score += 1
-        except OSError:
-            pass
-
-    if large_score >= 2 or score >= 8:
+    if role_score >= 4 or parallel >= 2 or score >= 13:
         return "RoleBasedCoorperation"
-
-    if research_score >= 2 or score >= 5:
+    if research_score >= 2 or score >= 7:
         return "MultiPathPlanGeneration"
-
-    if score >= 2:
+    if score >= 3 or active_groups >= 2 or dependencies >= 1:
         return "SinglePathPlanGeneration"
-
     return "ReAct"
 
 
@@ -3656,6 +4069,14 @@ _render_global_todo_panel()
 # ==========================================================
 # CHAT COMPOSER — native st.chat_input + THINK + live voice
 # ==========================================================
+# 새로고침으로 끊긴 실행이 저장되어 있으면 먼저 해당 실행을 복구합니다.
+_pending_execution = _get_pending_execution()
+st.session_state["execution_locked"] = bool(_pending_execution)
+if _pending_execution:
+    _resume_mode = str(_pending_execution.get("mode") or "ReAct")
+    choice = _resume_mode
+    st.info("이전 실행을 복구하고 있습니다. 복구가 끝나면 입력창을 다시 사용할 수 있습니다.")
+
 # Native chat_input 바로 위에만 작은 컨트롤을 둡니다. 입력창 자체는 건드리지 않습니다.
 _tool_left, _tool_right = st.columns([1, 1], gap="small")
 with _tool_left:
@@ -3671,12 +4092,19 @@ with _tool_left:
             st.toggle(
                 "사용",
                 key="thinking_enabled",
-                help="켜면 Gemma의 thinking 채널을 활성화합니다.",
+                disabled=bool(st.session_state.get("execution_locked", False)),
+                help="실행 중에는 현재 작업이 중단되지 않도록 설정을 잠급니다.",
             )
 
-# 음성 컴포넌트는 chat_input보다 먼저 실행하여, 받은 문장을 widget state에 넣습니다.
-# 음성 컴포넌트는 현재 native chat_input 제출을 방해하지 않도록 실행하지 않습니다.
-# voice_draft_text가 이미 있으면 chat_input에만 사전 입력합니다.
+# 음성 컴포넌트는 실제로 렌더링해야 브라우저에 마이크 버튼이 표시됩니다.
+# 받은 interim/final 문장은 chat_input 초안으로 반영하고, 전송은 chat_input이 담당합니다.
+with _tool_right:
+    _voice_result = _get_live_voice()
+    if isinstance(_voice_result, dict):
+        _voice_text = str(_voice_result.get("text", "") or "").strip()
+        if _voice_text:
+            st.session_state["voice_draft_text"] = _voice_text
+
 _voice_draft = str(st.session_state.pop("voice_draft_text", "") or "").strip()
 if _voice_draft:
     st.session_state["chat_input"] = _voice_draft
@@ -3687,13 +4115,15 @@ _chat_kwargs = dict(
     placeholder="메시지를 입력하세요…",
     key="chat_input",
     max_chars=None,
-    disabled=False,
+    disabled=bool(_pending_execution),
 )
 if "accept_file" in _chat_sig:
     _chat_kwargs["accept_file"] = "multiple"
     _chat_kwargs["file_type"] = None
 if "max_upload_size" in _chat_sig:
-    _chat_kwargs["max_upload_size"] = 10240  # 10 GB / 파일; 실제 제한은 서버/프록시 환경에 따라 달라질 수 있음
+    # 애플리케이션 수준의 실질적인 크기 제한을 제거합니다.
+    # 실제 HTTP 프록시/서버가 별도 제한을 두는 경우에는 그 설정이 우선합니다.
+    _chat_kwargs["max_upload_size"] = 1_048_576  # 1 TB / 파일
 
 user_input = st.chat_input(**_chat_kwargs)
 
@@ -4618,29 +5048,39 @@ def _append_history_message(message):
 
 def _extract_uploaded_file_info(uploaded_files):
     saved = []
-    current_dir = os.getcwd()
+    current_dir = Path.cwd().resolve()
 
     for uploaded in uploaded_files or []:
-        filename = os.path.basename(
-            getattr(uploaded, "name", "uploaded_file")
-        ) or "uploaded_file"
-        filename = filename.replace("\\", "_").replace("/", "_")
-        target = os.path.join(current_dir, filename)
+        filename = os.path.basename(getattr(uploaded, "name", "uploaded_file") or "uploaded_file")
+        filename = filename.replace("\\", "_").replace("/", "_") or "uploaded_file"
+        target = current_dir / filename
+        # 같은 이름의 기존 파일을 절대 덮어쓰지 않습니다.
+        if target.exists():
+            stem, suffix = target.stem, target.suffix
+            index = 1
+            while target.exists():
+                target = current_dir / f"{stem}_{index}{suffix}"
+                index += 1
 
         try:
-            data = uploaded.getvalue()
-            with open(target, "wb") as f:
-                f.write(data)
-            saved.append(target)
+            # UploadedFile.getvalue()는 대형 파일 전체를 RAM에 복사할 수 있으므로
+            # read()를 청크 단위로 사용합니다.
+            if hasattr(uploaded, "seek"):
+                uploaded.seek(0)
+            with open(target, "wb") as out:
+                while True:
+                    chunk = uploaded.read(8 * 1024 * 1024)
+                    if not chunk:
+                        break
+                    out.write(chunk)
+            saved.append(str(target))
         except Exception as exc:
-            saved.append(
-                f"{filename} (저장 실패: {exc})"
-            )
+            saved.append(f"{filename} (저장 실패: {exc})")
 
     try:
+        # 업로드 직후 무거운 임베딩/index 생성을 하지 않고 도구를 등록만 합니다.
         _register_uploaded_retrievers(saved)
     except Exception as exc:
-        # 파일 업로드 자체는 실패시키지 않고 retriever만 실패 처리합니다.
         print("[RETRIEVER] registration failed:", repr(exc))
 
     return saved
@@ -4892,10 +5332,23 @@ def _build_multimodal_user_message(user_input):
 # ==========================================================
 # REACT EXECUTION
 # ==========================================================
-if choice == "ReAct" and user_input:
-    if user_input.text or user_input.files:
+_resume_react = bool(
+    _pending_execution
+    and str(_pending_execution.get("mode") or "") == "ReAct"
+    and not user_input
+)
+
+if choice == "ReAct" and (user_input or _resume_react):
+    _is_new_react_run = bool(user_input and (user_input.text or user_input.files))
+
+    if _is_new_react_run:
         _ACTIVE_SUBAGENT_RUN_ID = "run_" + uuid.uuid4().hex
         _ACTIVE_SUBAGENT_NO_SUB_GRAPH = None
+        _begin_chat_execution(
+            _ACTIVE_SUBAGENT_RUN_ID,
+            "ReAct",
+            getattr(user_input, "text", ""),
+        )
 
         # 업로드 파일을 먼저 저장/색인하여 동적 retriever 도구를 등록한 뒤
         # 현재 요청에 사용할 graph를 만듭니다.
@@ -4912,8 +5365,17 @@ if choice == "ReAct" and user_input:
         _append_history_message(
             multimodal_message
         )
+    else:
+        # 브라우저 새로고침으로 Streamlit 실행이 끊긴 경우,
+        # 마지막으로 디스크에 저장된 대화 상태부터 이어서 실행합니다.
+        _ACTIVE_SUBAGENT_RUN_ID = str(
+            _pending_execution.get("run_id")
+            or ("run_" + uuid.uuid4().hex)
+        )
+        _ACTIVE_SUBAGENT_NO_SUB_GRAPH = None
+        active_react_agent = _prepare_active_react_graphs()
 
-        with st.chat_message("assistant"):
+    with st.chat_message("assistant"):
             ui = AgentUI(st.container())
             final_answer = ""
             streamed_answer = False
@@ -5092,9 +5554,10 @@ if choice == "ReAct" and user_input:
                     final_answer = str(streamed_result)
 
             except Exception as exc:
-                st.error(
-                    f"에이전트 실행 중 오류가 발생했습니다: {exc}"
-                )
+                error_text = _format_execution_error(exc)
+                st.error(error_text)
+                _append_history_message(AM(content=error_text))
+                _finish_chat_execution("failed", error_text)
 
             ui.render_todos()
             _render_main_todo_panel()
@@ -5129,6 +5592,7 @@ if choice == "ReAct" and user_input:
                 )
 
             _persist_current_chat()
+            _finish_chat_execution("completed" if final_answer else "failed")
             _ACTIVE_SUBAGENT_RUN_ID = None
             _ACTIVE_SUBAGENT_NO_SUB_GRAPH = None
 
@@ -5136,18 +5600,30 @@ if choice == "ReAct" and user_input:
 # ==========================================================
 # PLAN MODES
 # ==========================================================
-def _run_planning_mode(mode_name: str, user_input):
+def _run_planning_mode(mode_name: str, user_input, resume: bool = False):
     if not user_input:
         return
 
-    if not (user_input.text or user_input.files):
+    if not resume and not (user_input.text or user_input.files):
         return
 
-    query, user_message, _ = _prepare_planning_query(user_input)
+    if resume:
+        query = str(getattr(user_input, "text", "") or "").strip()
+        user_message = None
+    else:
+        query, user_message, _ = _prepare_planning_query(user_input)
 
-    with st.chat_message("user"):
-        _display_history_content(user_message.content)
-    _append_history_message(user_message)
+    if user_message is not None:
+        with st.chat_message("user"):
+            _display_history_content(user_message.content)
+        _append_history_message(user_message)
+
+    if not resume:
+        _begin_chat_execution(
+            "run_" + uuid.uuid4().hex,
+            mode_name,
+            query,
+        )
 
     with st.chat_message("assistant"):
         ui = AgentUI(st.container())
@@ -5217,13 +5693,38 @@ def _run_planning_mode(mode_name: str, user_input):
                 ui.answer_delta("실행은 완료되었지만 최종 결과가 없습니다.", replace=True)
 
         except Exception as exc:
-            error_text = f"실행 중 오류가 발생했습니다: {exc}"
+            error_text = _format_execution_error(exc)
             st.error(error_text)
             _append_history_message(AM(content=error_text))
+            _finish_chat_execution("failed", error_text)
 
         finally:
+            if final_output:
+                _finish_chat_execution("completed")
+            elif not isinstance(_get_active_chat_record().get("execution"), dict):
+                pass
+            else:
+                execution_state = _get_active_chat_record().get("execution") or {}
+                if execution_state.get("status") == "running":
+                    _finish_chat_execution("failed")
             _set_active_agent_ui(None)
             _persist_current_chat()
+
+
+if (
+    _pending_execution
+    and not user_input
+    and choice in {
+        "SinglePathPlanGeneration",
+        "MultiPathPlanGeneration",
+        "RoleBasedCoorperation",
+    }
+):
+    _resume_input = SimpleNamespace(
+        text=str(_pending_execution.get("input_text", "") or ""),
+        files=[],
+    )
+    _run_planning_mode(choice, _resume_input, resume=True)
 
 
 if choice == "SinglePathPlanGeneration" and user_input:
