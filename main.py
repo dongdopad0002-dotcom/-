@@ -114,7 +114,6 @@ def _make_llm(enable_thinking: bool = False):
 st.set_page_config(
     page_title="정소윤 AI",
     page_icon="💁🏻‍♀️",
-    layout="wide",
     initial_sidebar_state="expanded",
 )
 
@@ -264,13 +263,7 @@ GLOBAL_CHAT_CSS = r"""
 html,body{background:var(--bg)!important;color:var(--text)!important}
 [data-testid="stAppViewContainer"]{background:var(--bg)!important}
 [data-testid="stHeader"]{background:transparent!important;height:0!important}
-[data-testid="stToolbar"],[data-testid="stDecoration"]{display:none!important}
 
-/* Main layout */
-.block-container{
-  max-width:980px!important;
-  padding:28px 24px 220px!important;
-}
 
 /* Header */
 .hero-title{
