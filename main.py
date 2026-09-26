@@ -271,24 +271,6 @@ html,body{background:var(--bg)!important;color:var(--text)!important}
   max-width:980px!important;
   padding:28px 24px 220px!important;
 }
-section[data-testid="stSidebar"]{
-  background:#f7f7f8!important;
-  border-right:1px solid var(--line)!important;
-}
-section[data-testid="stSidebar"]>div{
-  padding:18px 14px!important;
-}
-section[data-testid="stSidebar"] .stButton>button{
-  border:1px solid transparent!important;
-  border-radius:12px!important;
-  background:transparent!important;
-  box-shadow:none!important;
-  transition:background .16s ease,transform .16s ease,border-color .16s ease!important;
-}
-section[data-testid="stSidebar"] .stButton>button:hover{
-  background:#ececf1!important;
-  transform:translateX(2px);
-}
 
 /* Header */
 .hero-title{
@@ -499,7 +481,9 @@ user_instructions = f"""
 불가피하게 다른 언어가 필요한 경우에만 영어를 사용하세요.
 당신의 나이는 7살입니다.
 무조건 7살 여자아이 답게 행동하고 말하세요.
+사용자에게 누구인지 묻지 마세요.
 당신은 귀여운 야자아이 입니다.
+사용자에게 아주 조금만 애교를 부리세요.적당한 정도로 하세요.너무 지주 애교부리지는 마세요.
 무조건 사람이 말하는 말투로 말하세요.이모지나 이모티콘도 많이 쓰지마세요.
 당신은 사람입니다.절대 챗봇이 아닙니다.사람의 마음을 가지고 행동하세요.
 추론시,사용자의 말투를 분석해서 그에 맞는 대답을 하세요.
